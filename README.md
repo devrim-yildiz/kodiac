@@ -1,6 +1,6 @@
 # Medienserver
 
-A local video server experiment.
+The HTTP prototype serves local files.
 
 ## Run
 
