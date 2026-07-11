@@ -23,8 +23,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn file(State(state): State<Prototype>, Path(name): Path<String>) -> Result<Response, StatusCode> {
     let path = state.media.join(name);
-    let bytes = tokio::fs::read(path).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    Response::builder().body(Body::from(bytes)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let root = tokio::fs::canonicalize(state.media.as_ref()).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let path = tokio::fs::canonicalize(path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    if !path.starts_with(root) { return Err(StatusCode::NOT_FOUND); }
+    let file = tokio::fs::File::open(path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let length = file.metadata().await.map_err(|_| StatusCode::NOT_FOUND)?.len();
+    Response::builder().header("content-length", length)
+        .body(Body::from_stream(tokio_util::io::ReaderStream::new(file)))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn remux(State(state): State<Prototype>, Path(name): Path<String>) -> Result<Response, StatusCode> {

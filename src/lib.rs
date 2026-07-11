@@ -1,124 +1,53 @@
 pub mod streaming {
     pub mod range;
-    pub mod direct {
-        
-        use super::range::{self, Range};
-        use crate::error::{AppError, Result};
-        use axum::{
-            body::Body,
-            http::{HeaderMap, Method, StatusCode, header},
-            response::Response,
-        };
-        use futures_util::StreamExt;
-        use std::{path::Path, time::UNIX_EPOCH};
-        use tokio::{
-            fs::File,
-            io::{AsyncReadExt, AsyncSeekExt},
-        };
-        use tokio_util::{io::ReaderStream, sync::CancellationToken};
-        
-        pub async fn serve(
-            path: &Path,
-            headers: &HeaderMap,
-            method: &Method,
-            shutdown: CancellationToken,
-        ) -> Result<Response> {
-            let mut file = File::open(path).await?;
-            let metadata = file.metadata().await?;
-            if !metadata.is_file() {
-                return Err(AppError::NotFound);
-            }
-            let length = metadata.len();
-            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-            let etag = format!(
-                "\"{:x}-{:x}\"",
-                length,
-                modified
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            );
-            let last_modified = httpdate::fmt_http_date(modified);
-            let mut response = Response::builder()
-                .header(header::ACCEPT_RANGES, "bytes")
-                .header(header::ETAG, &etag)
-                .header(header::LAST_MODIFIED, &last_modified)
-                .header(header::CACHE_CONTROL, "private, no-cache")
-                .header(
-                    header::CONTENT_TYPE,
-                    mime_guess::from_path(path).first_or_octet_stream().as_ref(),
-                );
-            if let Some(value) = headers
-                .get(header::IF_NONE_MATCH)
-                .and_then(|v| v.to_str().ok())
-                && value
-                    .split(',')
-                    .any(|v| v.trim() == "*" || v.trim().trim_start_matches("W/") == etag)
-            {
-                return response
-                    .status(StatusCode::NOT_MODIFIED)
-                    .body(Body::empty())
-                    .map_err(|e| AppError::Internal(e.into()));
-            }
-            let if_range_matches = headers
-                .get(header::IF_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .is_none_or(|v| {
-                    v == etag
-                        || httpdate::parse_http_date(v).is_ok_and(|date| {
-                            modified
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs()
-                                <= date
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs()
-                        })
-                });
-            // Range is defined for GET only. HEAD describes the full representation.
-            let range = if method == Method::GET && if_range_matches {
-                range::parse(
-                    headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
-                    length,
-                )
-            } else {
-                Range::Full
-            };
-            let (start, count) = match range {
-                Range::Unsatisfiable => {
-                    return response
-                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                        .header(header::CONTENT_RANGE, format!("bytes */{length}"))
-                        .header(header::CONTENT_LENGTH, 0)
-                        .body(Body::empty())
-                        .map_err(|e| AppError::Internal(e.into()));
-                }
-                Range::Full => (0, length),
-                Range::Partial { start, end } => {
-                    response = response.status(StatusCode::PARTIAL_CONTENT).header(
-                        header::CONTENT_RANGE,
-                        format!("bytes {start}-{end}/{length}"),
-                    );
-                    (start, end - start + 1)
-                }
-            };
-            response = response.header(header::CONTENT_LENGTH, count);
-            let body = if method == Method::HEAD || count == 0 {
-                Body::empty()
-            } else {
-                file.seek(std::io::SeekFrom::Start(start)).await?;
-                Body::from_stream(
-                    ReaderStream::with_capacity(file.take(count), 64 * 1024)
-                        .take_until(shutdown.cancelled_owned()),
-                )
-            };
-            response
-                .body(body)
-                .map_err(|e| AppError::Internal(e.into()))
-        }
-    }
+    pub mod direct;
 }
 pub mod error;
+pub mod config {
+    
+    use clap::Parser;
+    use std::{net::IpAddr, path::PathBuf};
+    
+    #[derive(Clone, Parser)]
+    #[command(version, about)]
+    pub struct Config {
+        #[arg(long, env = "MEDIA_PATH")]
+        pub media_path: PathBuf,
+        #[arg(long, env = "BIND", default_value = "127.0.0.1")]
+        pub bind: IpAddr,
+        #[arg(long, env = "PORT", default_value_t = 8096)]
+        pub port: u16,
+        #[arg(long, env = "DB_PATH", default_value = "data/medienserver.db")]
+        pub db_path: PathBuf,
+        #[arg(long, env = "ADMIN_USER", default_value = "admin")]
+        pub admin_user: String,
+        #[arg(long, env = "ADMIN_PASSWORD_FILE")]
+        pub admin_password_file: Option<PathBuf>,
+        #[arg(long, env = "FFMPEG_PATH", default_value = "ffmpeg")]
+        pub ffmpeg: PathBuf,
+        #[arg(long, env = "FFPROBE_PATH", default_value = "ffprobe")]
+        pub ffprobe: PathBuf,
+        #[arg(long, env = "MAX_TRANSCODES", default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=32))]
+        pub max_transcodes: u16,
+        #[arg(long, env = "SCAN_INTERVAL_SECONDS", default_value_t = 300)]
+        pub scan_interval_seconds: u64,
+        #[arg(long, env = "TRANSCODE_MAX_SECONDS", default_value_t = 21600)]
+        pub transcode_max_seconds: u64,
+        #[arg(long, env = "TMDB_TOKEN", hide_env_values = true)]
+        pub tmdb_token: Option<String>,
+        #[arg(long, env = "TMDB_LANGUAGE", default_value = "en-US")]
+        pub tmdb_language: String,
+        #[arg(long, env = "METADATA_PATH", default_value = "data/metadata")]
+        pub metadata_path: PathBuf,
+        #[arg(long, env = "HW_ACCEL", default_value = "auto", value_parser = ["auto", "software", "vaapi", "nvenc", "qsv", "amf", "videotoolbox"])]
+        pub hw_accel: String,
+        #[arg(long, env = "VAAPI_DEVICE", default_value = "/dev/dri/renderD128")]
+        pub vaapi_device: String,
+        #[arg(long, env = "SECURE_COOKIE", default_value_t = false)]
+        pub secure_cookie: bool,
+        #[arg(long, env = "CORS_ORIGINS", value_delimiter = ',')]
+        pub cors_origins: Vec<String>,
+    }
+}
 pub mod api;
 pub fn server_name() -> &'static str { "medienserver" }

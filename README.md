@@ -1,6 +1,6 @@
 # Medienserver
 
-FFmpeg output is streamed instead of buffered to completion.
+Original-file reads stay within the canonical media root.
 
 ## Run
 
