@@ -7,3 +7,5 @@ license = "MIT"
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }

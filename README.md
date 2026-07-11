@@ -1,6 +1,6 @@
 # Medienserver
 
-The HTTP prototype serves local files.
+The prototype can remux local video through FFmpeg.
 
 ## Run
 
