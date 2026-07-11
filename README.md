@@ -1,6 +1,6 @@
 # Medienserver
 
-The prototype can remux local video through FFmpeg.
+FFmpeg output is streamed instead of buffered to completion.
 
 ## Run
 

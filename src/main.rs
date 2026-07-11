@@ -33,13 +33,26 @@ async fn remux(State(state): State<Prototype>, Path(name): Path<String>) -> Resu
 
 async fn pipe(path: PathBuf) -> Result<Response, StatusCode> {
     use std::process::Stdio;
-    let output = tokio::process::Command::new("ffmpeg")
+    use tokio_util::io::ReaderStream;
+    let mut child = tokio::process::Command::new("ffmpeg")
+        .kill_on_drop(true)
         .stdin(Stdio::null())
-        .args(["-v", "error", "-i"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .args(["-v", "error", "-nostdin", "-i"])
         .arg(path)
         .args(["-c", "copy", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"])
-        .output().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
-    if !output.status.success() { return Err(StatusCode::BAD_GATEWAY); }
+        .spawn().map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let stdout = child.stdout.take().ok_or(StatusCode::BAD_GATEWAY)?;
+    let stream = futures_util::stream::unfold((ReaderStream::new(stdout), child), |(mut stream, mut child)| async {
+        use futures_util::StreamExt;
+        if let Some(bytes) = stream.next().await {
+            Some((bytes, (stream, child)))
+        } else {
+            let _ = child.wait().await;
+            None
+        }
+    });
     Response::builder().header("content-type", "video/mp4")
-        .body(Body::from(output.stdout)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from_stream(stream)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
