@@ -62,3 +62,19 @@ async fn pipe(path: PathBuf) -> Result<Response, StatusCode> {
     Response::builder().header("content-type", "video/mp4")
         .body(Body::from_stream(stream)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
+
+async fn discover(root: PathBuf) -> std::io::Result<Vec<PathBuf>> {
+    let mut pending = vec![root];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let mut entries = tokio::fs::read_dir(directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let kind = entry.file_type().await?;
+            if kind.is_symlink() { continue; }
+            if kind.is_dir() { pending.push(entry.path()); }
+            else if kind.is_file() { files.push(entry.path()); }
+        }
+    }
+    files.sort();
+    Ok(files)
+}

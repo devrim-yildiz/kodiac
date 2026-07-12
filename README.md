@@ -1,6 +1,6 @@
 # Medienserver
 
-Original-file reads stay within the canonical media root.
+The directory walker discovers media recursively and skips symlinks.
 
 ## Run
 
