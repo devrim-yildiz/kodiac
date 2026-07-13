@@ -1,6 +1,6 @@
 # Medienserver
 
-The directory walker discovers media recursively and skips symlinks.
+ffprobe collects streams and duration with a bounded process lifetime.
 
 ## Run
 

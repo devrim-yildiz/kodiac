@@ -78,3 +78,14 @@ async fn discover(root: PathBuf) -> std::io::Result<Vec<PathBuf>> {
     files.sort();
     Ok(files)
 }
+
+async fn probe(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use std::{process::Stdio, time::Duration};
+    let output = tokio::time::timeout(Duration::from_secs(20),
+        tokio::process::Command::new("ffprobe")
+            .kill_on_drop(true).stdin(Stdio::null())
+            .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
+            .arg(path).output()).await??;
+    if !output.status.success() { return Err("ffprobe failed".into()); }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
