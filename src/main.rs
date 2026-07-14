@@ -89,3 +89,19 @@ async fn probe(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std:
     if !output.status.success() { return Err("ffprobe failed".into()); }
     Ok(serde_json::from_slice(&output.stdout)?)
 }
+
+async fn catalog(root: PathBuf, database: &std::path::Path) -> Result<usize, Box<dyn std::error::Error>> {
+    use sqlx::sqlite::SqliteConnectOptions;
+    let options = SqliteConnectOptions::new().filename(database).create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(options).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY NOT NULL, size INTEGER NOT NULL)")
+        .execute(&pool).await?;
+    let files = discover(root).await?;
+    for path in &files {
+        let size = tokio::fs::metadata(path).await?.len() as i64;
+        sqlx::query("INSERT INTO files(path,size) VALUES (?,?) ON CONFLICT(path) DO UPDATE SET size=excluded.size")
+            .bind(path.to_string_lossy().as_ref()).bind(size).execute(&pool).await?;
+    }
+    pool.close().await;
+    Ok(files.len())
+}

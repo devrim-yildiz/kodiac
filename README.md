@@ -1,6 +1,6 @@
 # Medienserver
 
-ffprobe collects streams and duration with a bounded process lifetime.
+SQLite stores a source inventory beside the media.
 
 ## Run
 
