@@ -75,6 +75,7 @@ async fn discover(root: PathBuf) -> std::io::Result<Vec<PathBuf>> {
             else if kind.is_file() { files.push(entry.path()); }
         }
     }
+    files.retain(|path| matches!(path.extension().and_then(|s| s.to_str()), Some("mkv" | "mp4" | "mov" | "m4v")));
     files.sort();
     Ok(files)
 }

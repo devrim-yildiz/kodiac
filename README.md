@@ -1,6 +1,6 @@
 # Medienserver
 
-SQLite stores a source inventory beside the media.
+Discovery filters common video extensions before indexing.
 
 ## Run
 
