@@ -1,6 +1,6 @@
 # Medienserver
 
-CLI arguments select media, database and listening address.
+The prototype stops on Ctrl-C and restricts FFmpeg input protocols.
 
 ## Run
 

@@ -18,7 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(state);
     let address = args.bind;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app).with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    }).await?;
     Ok(())
 }
 
@@ -87,6 +89,7 @@ async fn probe(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std:
         tokio::process::Command::new("ffprobe")
             .kill_on_drop(true).stdin(Stdio::null())
             .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
+            .args(["-protocol_whitelist", "file,pipe"])
             .arg(path).output()).await??;
     if !output.status.success() { return Err("ffprobe failed".into()); }
     Ok(serde_json::from_slice(&output.stdout)?)
