@@ -1,6 +1,6 @@
 # Medienserver
 
-Discovery filters common video extensions before indexing.
+CLI arguments select media, database and listening address.
 
 ## Run
 

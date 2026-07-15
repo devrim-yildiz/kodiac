@@ -8,14 +8,15 @@ struct Prototype {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let media = std::env::args().nth(1).unwrap_or_else(|| ".".into());
-    let state = Prototype { media: Arc::new(PathBuf::from(media)) };
+    let args = Arguments::parse()?;
+    let media = args.media;
+    let state = Prototype { media: Arc::new(media) };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/files/{name}", get(file))
         .route("/remux/{name}", get(remux))
         .with_state(state);
-    let address: SocketAddr = "127.0.0.1:8096".parse()?;
+    let address = args.bind;
     let listener = tokio::net::TcpListener::bind(address).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -105,4 +106,30 @@ async fn catalog(root: PathBuf, database: &std::path::Path) -> Result<usize, Box
     }
     pool.close().await;
     Ok(files.len())
+}
+
+struct Arguments {
+    media: PathBuf,
+    database: PathBuf,
+    bind: SocketAddr,
+}
+impl Arguments {
+    fn parse() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut result = Self {
+            media: PathBuf::from("."),
+            database: PathBuf::from("data/catalog.db"),
+            bind: "127.0.0.1:8096".parse()?,
+        };
+        let mut args = std::env::args().skip(1);
+        while let Some(flag) = args.next() {
+            let value = args.next().ok_or("missing argument value")?;
+            match flag.as_str() {
+                "--media-path" => result.media = value.into(),
+                "--db-path" => result.database = value.into(),
+                "--bind" => result.bind = value.parse()?,
+                _ => return Err(format!("unknown argument: {flag}").into()),
+            }
+        }
+        Ok(result)
+    }
 }
