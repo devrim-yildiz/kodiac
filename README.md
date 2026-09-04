@@ -1,15 +1,20 @@
 # Medienserver
 
-The prototype stops on Ctrl-C and restricts FFmpeg input protocols.
+A single-process media server with an embedded SQLite catalog.
 
 ## Run
 
-Install Rust and FFmpeg, then build with Cargo.
-Pass a local media directory when starting the process.
-The default listener is 127.0.0.1:8096.
+Build the Rust application after preparing the browser assets when present.
+Configure `--media-path`, `--db-path`, `--bind` and `--port` separately.
+FFmpeg and ffprobe must be available on PATH.
 
-## Scope
+## Media delivery
 
-This is an early single-library prototype.
-Use test media while evaluating playback.
-Do not expose the listener to untrusted networks.
+Original files support byte ranges. Compatible compressed tracks can be remuxed.
+Conversion uses a bounded FFmpeg child process with software fallback.
+Use a private library and temporary database during development.
+
+## Metadata
+
+Local NFO and artwork take priority over optional remote enrichment.
+Never put production credentials or catalog data in the repository.

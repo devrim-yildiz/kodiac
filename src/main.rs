@@ -1,138 +1,83 @@
-use axum::{body::Body, extract::{Path, State}, http::StatusCode, response::Response, routing::get, Router};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
-
-#[derive(Clone)]
-struct Prototype {
-    media: Arc<PathBuf>,
-}
+use anyhow::Context;
+use clap::Parser;
+use medienserver::{AppState, auth, config::Config, db, scanner};
+use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Arguments::parse()?;
-    let media = args.media;
-    let state = Prototype { media: Arc::new(media) };
-    let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
-        .route("/files/{name}", get(file))
-        .route("/remux/{name}", get(remux))
-        .with_state(state);
-    let address = args.bind;
+async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "medienserver=info,tower_http=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .with(medienserver::diagnostics::LogLayer)
+        .init();
+    let mut config = Config::parse();
+    config.media_path = tokio::fs::canonicalize(&config.media_path)
+        .await
+        .context("media directory must exist")?;
+    anyhow::ensure!(
+        tokio::fs::metadata(&config.media_path).await?.is_dir(),
+        "media path must be a directory"
+    );
+    anyhow::ensure!(
+        config.transcode_max_seconds > 0,
+        "transcode maximum must be positive"
+    );
+    let pool = db::connect(&config).await?;
+    auth::bootstrap(&pool, &config).await?;
+    let address = (config.bind, config.port);
+    let state = AppState::new(pool, config).await?;
+    let app = medienserver::router(state.clone())?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app).with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    }).await?;
-    Ok(())
-}
-
-async fn file(State(state): State<Prototype>, Path(name): Path<String>) -> Result<Response, StatusCode> {
-    let path = state.media.join(name);
-    let root = tokio::fs::canonicalize(state.media.as_ref()).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    let path = tokio::fs::canonicalize(path).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    if !path.starts_with(root) { return Err(StatusCode::NOT_FOUND); }
-    let file = tokio::fs::File::open(path).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    let length = file.metadata().await.map_err(|_| StatusCode::NOT_FOUND)?.len();
-    Response::builder().header("content-length", length)
-        .body(Body::from_stream(tokio_util::io::ReaderStream::new(file)))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn remux(State(state): State<Prototype>, Path(name): Path<String>) -> Result<Response, StatusCode> {
-    pipe(state.media.join(name)).await
-}
-
-async fn pipe(path: PathBuf) -> Result<Response, StatusCode> {
-    use std::process::Stdio;
-    use tokio_util::io::ReaderStream;
-    let mut child = tokio::process::Command::new("ffmpeg")
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .args(["-v", "error", "-nostdin", "-i"])
-        .arg(path)
-        .args(["-c", "copy", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"])
-        .spawn().map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let stdout = child.stdout.take().ok_or(StatusCode::BAD_GATEWAY)?;
-    let stream = futures_util::stream::unfold((ReaderStream::new(stdout), child), |(mut stream, mut child)| async {
-        use futures_util::StreamExt;
-        if let Some(bytes) = stream.next().await {
-            Some((bytes, (stream, child)))
-        } else {
-            let _ = child.wait().await;
-            None
-        }
-    });
-    Response::builder().header("content-type", "video/mp4")
-        .body(Body::from_stream(stream)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn discover(root: PathBuf) -> std::io::Result<Vec<PathBuf>> {
-    let mut pending = vec![root];
-    let mut files = Vec::new();
-    while let Some(directory) = pending.pop() {
-        let mut entries = tokio::fs::read_dir(directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let kind = entry.file_type().await?;
-            if kind.is_symlink() { continue; }
-            if kind.is_dir() { pending.push(entry.path()); }
-            else if kind.is_file() { files.push(entry.path()); }
-        }
-    }
-    files.retain(|path| matches!(path.extension().and_then(|s| s.to_str()), Some("mkv" | "mp4" | "mov" | "m4v")));
-    files.sort();
-    Ok(files)
-}
-
-async fn probe(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    use std::{process::Stdio, time::Duration};
-    let output = tokio::time::timeout(Duration::from_secs(20),
-        tokio::process::Command::new("ffprobe")
-            .kill_on_drop(true).stdin(Stdio::null())
-            .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
-            .args(["-protocol_whitelist", "file,pipe"])
-            .arg(path).output()).await??;
-    if !output.status.success() { return Err("ffprobe failed".into()); }
-    Ok(serde_json::from_slice(&output.stdout)?)
-}
-
-async fn catalog(root: PathBuf, database: &std::path::Path) -> Result<usize, Box<dyn std::error::Error>> {
-    use sqlx::sqlite::SqliteConnectOptions;
-    let options = SqliteConnectOptions::new().filename(database).create_if_missing(true);
-    let pool = sqlx::SqlitePool::connect_with(options).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY NOT NULL, size INTEGER NOT NULL)")
-        .execute(&pool).await?;
-    let files = discover(root).await?;
-    for path in &files {
-        let size = tokio::fs::metadata(path).await?.len() as i64;
-        sqlx::query("INSERT INTO files(path,size) VALUES (?,?) ON CONFLICT(path) DO UPDATE SET size=excluded.size")
-            .bind(path.to_string_lossy().as_ref()).bind(size).execute(&pool).await?;
-    }
-    pool.close().await;
-    Ok(files.len())
-}
-
-struct Arguments {
-    media: PathBuf,
-    database: PathBuf,
-    bind: SocketAddr,
-}
-impl Arguments {
-    fn parse() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut result = Self {
-            media: PathBuf::from("."),
-            database: PathBuf::from("data/catalog.db"),
-            bind: "127.0.0.1:8096".parse()?,
-        };
-        let mut args = std::env::args().skip(1);
-        while let Some(flag) = args.next() {
-            let value = args.next().ok_or("missing argument value")?;
-            match flag.as_str() {
-                "--media-path" => result.media = value.into(),
-                "--db-path" => result.database = value.into(),
-                "--bind" => result.bind = value.parse()?,
-                _ => return Err(format!("unknown argument: {flag}").into()),
+    medienserver::diagnostics::event("Server started");
+    let search_task = tokio::spawn(medienserver::api::v1::curation::run_index(state.clone()));
+    let frame_task = tokio::spawn(scanner::frames::run(state.clone()));
+    let tmdb_task = tokio::spawn(scanner::tmdb_worker::run(state.clone()));
+    let scan_state = state.clone();
+    let scan_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = scan_state.shutdown.cancelled() => break,
+                result = scanner::scan(&scan_state) => if let Err(error) = result { tracing::error!(%error, "scan failed; previous catalog retained"); }
+            }
+            if scan_state.config.scan_interval_seconds == 0 {
+                break;
+            }
+            tokio::select! {
+                _ = scan_state.shutdown.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(scan_state.config.scan_interval_seconds)) => {}
             }
         }
-        Ok(result)
+    });
+    tracing::info!(address = %listener.local_addr()?, "server listening");
+    let shutdown = state.shutdown.clone();
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+        })
+        .await;
+    state.shutdown.cancel();
+    scan_task.await?;
+    tmdb_task.await?;
+    frame_task.await?;
+    search_task.await?;
+    state.pool.close().await;
+    result?;
+    Ok(())
+}
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
