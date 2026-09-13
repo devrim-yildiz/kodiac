@@ -82,7 +82,11 @@ async fn serve_output(
         .clone()
         .try_acquire_owned()
         .map_err(|_| AppError::Busy)?;
-    let origin = start_seconds;
+    let origin = if !transcode && start_seconds > 0.0 {
+        remux_origin(state, path, start_seconds).await?
+    } else {
+        start_seconds
+    };
     let backends = if transcode {
         super::hardware::discover(state).await
     } else {
@@ -143,7 +147,7 @@ async fn serve_output(
         } else {
             command.args([
                 "-movflags",
-                "+frag_keyframe+empty_moov",
+                "+frag_keyframe+empty_moov+default_base_moof",
                 "-frag_duration",
                 "100000",
                 "-flush_packets",
@@ -233,6 +237,60 @@ async fn serve_output(
         .header("x-media-start-seconds", format!("{origin:.6}"))
         .body(Body::from_stream(stream))
         .map_err(|e| AppError::Internal(e.into()))
+}
+
+async fn remux_origin(state: &AppState, path: &Path, seconds: f64) -> Result<f64> {
+    let mut child = Command::new(&state.config.ffprobe)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .args([
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-select_streams",
+            "v:0",
+            "-read_intervals",
+            &format!("{seconds:.6}%+#1"),
+            "-show_entries",
+            "packet=dts_time:format=start_time",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .spawn()
+        .map_err(|_| AppError::Pipeline)?;
+    let mut stdout = child.stdout.take().ok_or(AppError::Pipeline)?.take(16385);
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        anyhow::ensure!(bytes.len() <= 16384, "seek probe output too large");
+        anyhow::ensure!(child.wait().await?.success(), "seek probe failed");
+        let json: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let dts = json["packets"][0]["dts_time"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| anyhow::anyhow!("seek probe has no decode timestamp"))?;
+        let start = json["format"]["start_time"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let origin = dts - start;
+        anyhow::ensure!(
+            origin.is_finite() && origin <= seconds + 1.0 && origin >= -60.0,
+            "invalid seek origin"
+        );
+        Ok::<f64, anyhow::Error>(origin)
+    })
+    .await;
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    result.map_err(|_| AppError::Pipeline)?.map_err(|error| {
+        tracing::warn!(%error, "remux seek origin unavailable");
+        AppError::Pipeline
+    })
 }
 
 #[cfg(test)]
