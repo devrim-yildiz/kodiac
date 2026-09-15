@@ -1,165 +1,100 @@
 
-
-pub mod v1 {
-    
-    
-    
-    
-    
-    use crate::{
-        AppState,
-        auth::{self, User},
-        db,
-        error::{AppError, Result},
-        scanner, streaming,
-    };
-    use axum::{
-        Extension, Json, Router,
-        extract::{Path, Query, State},
-        routing::{get, post},
-    };
-    use serde::{Deserialize, Serialize};
-    use serde_json::{Value, json};
-    
-    pub fn router() -> Router<AppState> {
-        Router::new()
-            .merge(hierarchy::router())
-            .merge(settings::router())
-            .merge(curation::router())
-            .merge(immersion::router())
-            .route(
-                "/api/v1/videos/{id}/subtitles/{index}",
-                get(streaming::subtitles::serve),
-            )
-            .route("/api/v1/items", get(items))
-            .route("/api/v1/series", get(series))
-            .route("/api/v1/items/{id}", get(item))
-            .route("/api/v1/items/{id}/stream", get(streaming::stream))
-            .route("/api/v1/items/{id}/poster", get(streaming::poster))
-            .route("/api/v1/items/{id}/backdrop", get(streaming::backdrop))
-            .route("/api/v1/scan", post(scan))
-            .route("/api/v1/me", get(me))
-            .route("/api/v1/logout", post(auth::logout))
-            .route("/api/v1/playback", get(playback).post(progress))
-    }
-    pub async fn health(State(state): State<AppState>) -> Result<Json<Value>> {
-        sqlx::query("SELECT 1").execute(&state.pool).await?;
-        Ok(Json(
-            json!({"status":"ok", "version":env!("CARGO_PKG_VERSION")}),
-        ))
-    }
-    #[derive(Default, Deserialize)]
-    pub struct CatalogQuery {
-        pub kind: Option<String>,
-        pub search: Option<String>,
-        pub offset: Option<i64>,
-        pub limit: Option<i64>,
-    }
-    async fn catalog(state: &AppState, q: CatalogQuery) -> Result<Json<Value>> {
-        if q.kind
-            .as_deref()
-            .is_some_and(|k| !matches!(k, "movie" | "episode"))
-        {
-            return Err(AppError::BadRequest("kind must be movie or episode".into()));
+pub mod jellyfin {
+    pub mod dto {
+        
+        use crate::{auth::User, db::MediaItem};
+        use serde::Serialize;
+        use serde_json::{Value, json};
+        
+        #[derive(Serialize)]
+        #[serde(rename_all = "PascalCase")]
+        pub struct ItemsResponse {
+            pub items: Vec<Value>,
+            pub total_record_count: i64,
+            pub start_index: i64,
         }
-        let (items, total) = db::catalog(
-            &state.pool,
-            q.kind.as_deref(),
-            q.search.as_deref().unwrap_or(""),
-            q.offset.unwrap_or(0),
-            q.limit.unwrap_or(100),
-        )
-        .await?;
-        Ok(Json(json!({"items":items,"total":total})))
-    }
-    async fn items(
-        State(state): State<AppState>,
-        Query(q): Query<CatalogQuery>,
-    ) -> Result<Json<Value>> {
-        catalog(&state, q).await
-    }
-    async fn series(State(state): State<AppState>) -> Result<Json<Value>> {
-        let rows: Vec<(String,i64)> = sqlx::query_as("SELECT COALESCE(series_name,'Unknown series'),COUNT(*) FROM media_items WHERE available=1 AND kind='episode' GROUP BY series_name ORDER BY series_name").fetch_all(&state.pool).await?;
-        Ok(Json(
-            json!({"items": rows.into_iter().map(|(name,episodes)| json!({"name":name,"episodes":episodes})).collect::<Vec<_>>()}),
-        ))
-    }
-    async fn item(
-        State(state): State<AppState>,
-        Path(id): Path<String>,
-    ) -> Result<Json<db::MediaItem>> {
-        Ok(Json(db::item(&state.pool, &id).await?))
-    }
-    async fn me(Extension(user): Extension<User>) -> Json<Value> {
-        Json(json!({"id":user.id,"username":user.username}))
-    }
-    async fn scan(State(state): State<AppState>) -> Result<Json<scanner::ScanReport>> {
-        scanner::scan(&state).await.map(Json).map_err(|error| {
-            if error.is::<scanner::ScanBusy>() {
-                AppError::Busy
-            } else {
-                AppError::Internal(error)
+        pub fn user(user: &User, server: &str) -> Value {
+            json!({"Id":user.id,"Name":user.username,"ServerId":server,"HasPassword":true,"HasConfiguredPassword":true,"HasConfiguredEasyPassword":false,
+                "Configuration":{"AudioLanguagePreference":"","PlayDefaultAudioTrack":true,"SubtitleMode":"Default","EnableNextEpisodeAutoPlay":true},
+                "Policy":{"IsAdministrator":true,"IsHidden":false,"IsDisabled":false,"EnableMediaPlayback":true,"EnableVideoPlaybackTranscoding":true,"EnableAudioPlaybackTranscoding":true,"EnablePlaybackRemuxing":true,"EnableAllFolders":true,"EnableContentDownloading":true,"EnableSyncTranscoding":false}})
+        }
+        fn video_range(stream: &Value) -> &'static str {
+            match stream["color_transfer"].as_str() {
+                Some("smpte2084") => "HDR10",
+                Some("arib-std-b67") => "HLG",
+                _ => "SDR",
             }
-        })
-    }
-    #[derive(Deserialize)]
-    pub struct Progress {
-        pub item_id: String,
-        pub profile_id: Option<String>,
-        pub completed: Option<bool>,
-        pub position_ticks: i64,
-        #[serde(default)]
-        pub is_paused: bool,
-        #[serde(default)]
-        pub stopped: bool,
-    }
-    pub async fn save_progress(state: &AppState, user: &User, progress: Progress) -> Result<()> {
-        if progress.position_ticks < 0 {
-            return Err(AppError::BadRequest("negative position".into()));
         }
-        let item = db::item(&state.pool, &progress.item_id).await?;
-        let profile_id =
-            hierarchy::resolve_profile(&state.pool, user, progress.profile_id.as_deref()).await?;
-        let completed = progress.completed.unwrap_or_else(|| {
-            item.runtime_seconds
-                .is_some_and(|n| n > 0.0 && progress.position_ticks as f64 >= n * 10_000_000.0 * 0.95)
-        });
-        let mut tx = state.pool.begin().await?;
-        // Default-profile writes remain visible to legacy browser/Jellyfin clients.
-        sqlx::query("INSERT INTO playback_sessions(id,user_id,media_item_id,position_ticks,is_paused,stopped) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM profiles WHERE id=? AND is_default=1) ON CONFLICT(user_id,media_item_id) DO UPDATE SET position_ticks=excluded.position_ticks,is_paused=excluded.is_paused,stopped=excluded.stopped,updated_at=unixepoch()")
-            .bind(uuid::Uuid::new_v4().simple().to_string()).bind(&user.id).bind(&progress.item_id).bind(progress.position_ticks).bind(progress.is_paused).bind(progress.stopped).bind(&profile_id).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO playback_history(profile_id,media_item_id,position_ticks,is_paused,stopped,completed) VALUES(?,?,?,?,?,?) ON CONFLICT(profile_id,media_item_id) DO UPDATE SET position_ticks=excluded.position_ticks,is_paused=excluded.is_paused,stopped=excluded.stopped,completed=excluded.completed,updated_at=unixepoch()")
-            .bind(profile_id).bind(progress.item_id).bind(progress.position_ticks).bind(progress.is_paused).bind(progress.stopped).bind(completed).execute(&mut *tx).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-    async fn progress(
-        State(state): State<AppState>,
-        Extension(user): Extension<User>,
-        Json(progress): Json<Progress>,
-    ) -> Result<axum::http::StatusCode> {
-        save_progress(&state, &user, progress).await?;
-        Ok(axum::http::StatusCode::NO_CONTENT)
-    }
-    #[derive(Serialize, sqlx::FromRow)]
-    struct Playback {
-        media_item_id: String,
-        position_ticks: i64,
-        is_paused: bool,
-        stopped: bool,
-        updated_at: i64,
-    }
-    async fn playback(
-        State(state): State<AppState>,
-        Extension(user): Extension<User>,
-        Query(q): Query<hierarchy::ProfileQuery>,
-    ) -> Result<Json<Value>> {
-        let profile_id =
-            hierarchy::resolve_profile(&state.pool, &user, q.profile_id.as_deref()).await?;
-        let items: Vec<Playback> = sqlx::query_as("SELECT media_item_id,position_ticks,is_paused,stopped,updated_at FROM playback_history WHERE profile_id=? ORDER BY updated_at DESC,media_item_id LIMIT ? OFFSET ?").bind(profile_id).bind(q.limit.unwrap_or(200).clamp(1,200)).bind(q.offset.unwrap_or(0).max(0)).fetch_all(&state.pool).await?;
-        Ok(Json(json!({"items":items})))
+        pub fn source(item: &MediaItem) -> Value {
+            let raw: Vec<Value> = serde_json::from_str(&item.streams_json).unwrap_or_default();
+            let streams: Vec<Value> = raw.iter().map(|stream| json!({
+                "Index": stream["index"], "Type": match stream["codec_type"].as_str() { Some("video")=>"Video",Some("audio")=>"Audio",Some("subtitle")=>"Subtitle",_=>"Data" },
+                "VideoRange":video_range(stream),"Codec":stream["codec_name"],"Width":stream["width"],"Height":stream["height"],"Channels":stream["channels"],
+                "SampleRate":stream["sample_rate"].as_str().and_then(|s| s.parse::<u64>().ok()),"Language":stream["tags"]["language"],"Title":stream["tags"]["title"],
+                "IsExternal":stream["external_path"].is_string(),"IsDefault":stream["disposition"]["default"]==1,"IsForced":stream["disposition"]["forced"]==1,
+                "IsTextSubtitleStream":stream["codec_type"]=="subtitle" && crate::streaming::subtitles::is_text(stream["codec_name"].as_str().unwrap_or("")),
+                "DeliveryMethod":if stream["codec_type"]=="subtitle" && crate::streaming::subtitles::is_text(stream["codec_name"].as_str().unwrap_or("")) {Some("External")} else {None},
+                "DeliveryUrl":if stream["codec_type"]=="subtitle" && crate::streaming::subtitles::is_text(stream["codec_name"].as_str().unwrap_or("")) {Some(format!("/Videos/{}/{}/Subtitles/{}/Stream.vtt",item.id,item.id,stream["index"]))}else{None},
+                "DisplayTitle":stream["tags"]["title"].as_str().or(stream["tags"]["language"].as_str()).unwrap_or("Unknown")
+            })).collect();
+            json!({"Id":item.id,"Name":item.title,"Protocol":"Http","Type":"Default","Container":item.container,
+                "Path":format!("/Videos/{}/stream?Static=true",item.id),"DirectStreamUrl":format!("/Videos/{}/stream?Static=true",item.id),
+                "Size":item.size_bytes,"RunTimeTicks":item.runtime_seconds.map(|n|(n*10_000_000.0) as i64),
+                "SupportsDirectPlay":true,"SupportsDirectStream":true,"SupportsTranscoding":false,
+                "IsRemote":false,"RequiresOpening":false,"RequiresClosing":false,"MediaStreams":streams,
+                "DefaultAudioStreamIndex":raw.iter().find(|s|s["codec_type"]=="audio").map(|s|s["index"].clone())})
+        }
+        pub fn item(item: &MediaItem, server: &str, position: i64) -> Value {
+            json!({"Id":item.id,"ServerId":server,"Name":item.title,"Overview":item.plot,"ProductionYear":item.year,
+                "Type":if item.kind=="episode" {"Episode"} else {"Movie"},"MediaType":"Video","IsFolder":false,
+                "Container":item.container,"VideoType":"VideoFile","LocationType":"FileSystem",
+                "RunTimeTicks":item.runtime_seconds.map(|n|(n*10_000_000.0) as i64),"SeriesName":item.series_name,
+                "ParentIndexNumber":item.season,"IndexNumber":item.episode,"MediaSources":[source(item)],
+                "ImageTags":if item.poster_path.is_some() {json!({"Primary":item.id})} else {json!({})},
+                "ParentId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))).unwrap_or_else(||super::navigation::MOVIES.into()),
+                "SeriesId":item.series_name.as_ref().map(|n|super::navigation::series_id(n)),
+                "SeasonId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))),
+                "BackdropImageTags":if item.backdrop_path.is_some() {json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":position,"PlayCount":0,"IsFavorite":false,"Played":false,"Key":item.id}})
+        }
+        
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            #[test]
+            fn hdr_labels_require_transfer_metadata() {
+                assert_eq!(video_range(&json!({"pix_fmt":"yuv420p10le"})), "SDR");
+                assert_eq!(video_range(&json!({"color_transfer":"smpte2084"})), "HDR10");
+                assert_eq!(
+                    video_range(&json!({"color_transfer":"arib-std-b67"})),
+                    "HLG"
+                );
+            }
+            #[test]
+            fn wire_names_and_user_policy_match_jellyfin() {
+                let response = serde_json::to_value(ItemsResponse {
+                    items: vec![],
+                    total_record_count: 17,
+                    start_index: 10,
+                })
+                .unwrap();
+                assert_eq!(
+                    response,
+                    json!({"Items":[],"TotalRecordCount":17,"StartIndex":10})
+                );
+                let policy = user(
+                    &User {
+                        id: "user".into(),
+                        username: "admin".into(),
+                    },
+                    "server",
+                );
+                assert_eq!(policy["Policy"]["EnableVideoPlaybackTranscoding"], true);
+                assert_eq!(policy["ServerId"], "server");
+            }
+        }
     }
 }
+pub mod v1;
 use axum::{extract::Request, middleware::Next, response::Response};
 pub async fn security_headers(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
