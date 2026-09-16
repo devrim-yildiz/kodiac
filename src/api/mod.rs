@@ -1,98 +1,230 @@
 
 pub mod jellyfin {
-    pub mod dto {
+    pub mod navigation {
         
-        use crate::{auth::User, db::MediaItem};
-        use serde::Serialize;
+        use crate::{
+            AppState,
+            auth::User,
+            db::MediaItem,
+            error::{AppError, Result},
+        };
+        use serde::Deserialize;
         use serde_json::{Value, json};
-        
-        #[derive(Serialize)]
-        #[serde(rename_all = "PascalCase")]
-        pub struct ItemsResponse {
-            pub items: Vec<Value>,
-            pub total_record_count: i64,
-            pub start_index: i64,
+        use sha2::{Digest, Sha256};
+        use std::collections::{BTreeMap, HashMap};
+        pub const MOVIES: &str = "00000000000000000000000000000001";
+        pub const SERIES: &str = "00000000000000000000000000000002";
+        pub fn series_id(name: &str) -> String {
+            format!("{:x}", Sha256::digest(format!("series:{name}").as_bytes()))[..32].into()
         }
-        pub fn user(user: &User, server: &str) -> Value {
-            json!({"Id":user.id,"Name":user.username,"ServerId":server,"HasPassword":true,"HasConfiguredPassword":true,"HasConfiguredEasyPassword":false,
-                "Configuration":{"AudioLanguagePreference":"","PlayDefaultAudioTrack":true,"SubtitleMode":"Default","EnableNextEpisodeAutoPlay":true},
-                "Policy":{"IsAdministrator":true,"IsHidden":false,"IsDisabled":false,"EnableMediaPlayback":true,"EnableVideoPlaybackTranscoding":true,"EnableAudioPlaybackTranscoding":true,"EnablePlaybackRemuxing":true,"EnableAllFolders":true,"EnableContentDownloading":true,"EnableSyncTranscoding":false}})
+        pub fn season_id(name: &str, season: i64) -> String {
+            format!(
+                "{:x}",
+                Sha256::digest(format!("season:{name}:{season}").as_bytes())
+            )[..32]
+                .into()
         }
-        fn video_range(stream: &Value) -> &'static str {
-            match stream["color_transfer"].as_str() {
-                Some("smpte2084") => "HDR10",
-                Some("arib-std-b67") => "HLG",
-                _ => "SDR",
-            }
+        pub fn views(state: &AppState) -> Value {
+            let rows:Vec<_>=[(MOVIES,"Movies","movies"),(SERIES,"Series","tvshows")].into_iter().map(|(id,name,kind)|json!({"Id":id,"Name":name,"ServerId":*state.server_id,"Type":"CollectionFolder","IsFolder":true,"CollectionType":kind,"ImageTags":{},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})).collect();
+            json!({"Items":rows,"TotalRecordCount":2,"StartIndex":0})
         }
-        pub fn source(item: &MediaItem) -> Value {
-            let raw: Vec<Value> = serde_json::from_str(&item.streams_json).unwrap_or_default();
-            let streams: Vec<Value> = raw.iter().map(|stream| json!({
-                "Index": stream["index"], "Type": match stream["codec_type"].as_str() { Some("video")=>"Video",Some("audio")=>"Audio",Some("subtitle")=>"Subtitle",_=>"Data" },
-                "VideoRange":video_range(stream),"Codec":stream["codec_name"],"Width":stream["width"],"Height":stream["height"],"Channels":stream["channels"],
-                "SampleRate":stream["sample_rate"].as_str().and_then(|s| s.parse::<u64>().ok()),"Language":stream["tags"]["language"],"Title":stream["tags"]["title"],
-                "IsExternal":stream["external_path"].is_string(),"IsDefault":stream["disposition"]["default"]==1,"IsForced":stream["disposition"]["forced"]==1,
-                "IsTextSubtitleStream":stream["codec_type"]=="subtitle" && crate::streaming::subtitles::is_text(stream["codec_name"].as_str().unwrap_or("")),
-                "DeliveryMethod":if stream["codec_type"]=="subtitle" && crate::streaming::subtitles::is_text(stream["codec_name"].as_str().unwrap_or("")) {Some("External")} else {None},
-                "DeliveryUrl":if stream["codec_type"]=="subtitle" && crate::streaming::subtitles::is_text(stream["codec_name"].as_str().unwrap_or("")) {Some(format!("/Videos/{}/{}/Subtitles/{}/Stream.vtt",item.id,item.id,stream["index"]))}else{None},
-                "DisplayTitle":stream["tags"]["title"].as_str().or(stream["tags"]["language"].as_str()).unwrap_or("Unknown")
-            })).collect();
-            json!({"Id":item.id,"Name":item.title,"Protocol":"Http","Type":"Default","Container":item.container,
-                "Path":format!("/Videos/{}/stream?Static=true",item.id),"DirectStreamUrl":format!("/Videos/{}/stream?Static=true",item.id),
-                "Size":item.size_bytes,"RunTimeTicks":item.runtime_seconds.map(|n|(n*10_000_000.0) as i64),
-                "SupportsDirectPlay":true,"SupportsDirectStream":true,"SupportsTranscoding":false,
-                "IsRemote":false,"RequiresOpening":false,"RequiresClosing":false,"MediaStreams":streams,
-                "DefaultAudioStreamIndex":raw.iter().find(|s|s["codec_type"]=="audio").map(|s|s["index"].clone())})
+        #[derive(Default, Deserialize)]
+        #[serde(default, rename_all = "PascalCase")]
+        pub struct ItemQuery {
+            pub start_index: Option<i64>,
+            pub limit: Option<i64>,
+            pub search_term: Option<String>,
+            pub include_item_types: Option<String>,
+            pub parent_id: Option<String>,
+            pub sort_by: Option<String>,
+            pub sort_order: Option<String>,
+            pub recursive: Option<bool>,
+            pub season_id: Option<String>,
+            pub season: Option<i64>,
+            pub user_id: Option<String>,
         }
-        pub fn item(item: &MediaItem, server: &str, position: i64) -> Value {
-            json!({"Id":item.id,"ServerId":server,"Name":item.title,"Overview":item.plot,"ProductionYear":item.year,
-                "Type":if item.kind=="episode" {"Episode"} else {"Movie"},"MediaType":"Video","IsFolder":false,
-                "Container":item.container,"VideoType":"VideoFile","LocationType":"FileSystem",
-                "RunTimeTicks":item.runtime_seconds.map(|n|(n*10_000_000.0) as i64),"SeriesName":item.series_name,
-                "ParentIndexNumber":item.season,"IndexNumber":item.episode,"MediaSources":[source(item)],
-                "ImageTags":if item.poster_path.is_some() {json!({"Primary":item.id})} else {json!({})},
-                "ParentId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))).unwrap_or_else(||super::navigation::MOVIES.into()),
-                "SeriesId":item.series_name.as_ref().map(|n|super::navigation::series_id(n)),
-                "SeasonId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))),
-                "BackdropImageTags":if item.backdrop_path.is_some() {json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":position,"PlayCount":0,"IsFavorite":false,"Played":false,"Key":item.id}})
+        async fn all(state: &AppState) -> Result<Vec<MediaItem>> {
+            Ok(sqlx::query_as(
+                "SELECT * FROM media_items WHERE available=1 ORDER BY series_name,season,episode,title,id",
+            )
+            .fetch_all(&state.pool)
+            .await?)
         }
-        
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-            #[test]
-            fn hdr_labels_require_transfer_metadata() {
-                assert_eq!(video_range(&json!({"pix_fmt":"yuv420p10le"})), "SDR");
-                assert_eq!(video_range(&json!({"color_transfer":"smpte2084"})), "HDR10");
-                assert_eq!(
-                    video_range(&json!({"color_transfer":"arib-std-b67"})),
-                    "HLG"
-                );
-            }
-            #[test]
-            fn wire_names_and_user_policy_match_jellyfin() {
-                let response = serde_json::to_value(ItemsResponse {
-                    items: vec![],
-                    total_record_count: 17,
-                    start_index: 10,
+        pub async fn representative(state: &AppState, id: &str) -> Result<MediaItem> {
+            all(state)
+                .await?
+                .into_iter()
+                .find(|i| {
+                    i.series_name
+                        .as_ref()
+                        .is_some_and(|s| series_id(s) == id || season_id(s, i.season.unwrap_or(0)) == id)
                 })
-                .unwrap();
-                assert_eq!(
-                    response,
-                    json!({"Items":[],"TotalRecordCount":17,"StartIndex":10})
-                );
-                let policy = user(
-                    &User {
-                        id: "user".into(),
-                        username: "admin".into(),
-                    },
-                    "server",
-                );
-                assert_eq!(policy["Policy"]["EnableVideoPlaybackTranscoding"], true);
-                assert_eq!(policy["ServerId"], "server");
+                .ok_or(AppError::NotFound)
+        }
+        fn folder(item: &MediaItem, state: &AppState, season: bool) -> Value {
+            let name = item.series_name.as_deref().unwrap_or("Unknown series");
+            let n = item.season.unwrap_or(0);
+            json!({"Id":if season {season_id(name,n)} else {series_id(name)},"Name":if season {format!("Season {n}")} else {name.into()},"ServerId":*state.server_id,"Type":if season {"Season"} else {"Series"},"IsFolder":true,"Overview":if season {""} else {&item.plot},"IndexNumber":if season {Some(n)} else {None},"ParentId":if season {series_id(name)} else {SERIES.into()},"SeriesId":series_id(name),"SeriesName":name,"ImageTags":if item.poster_path.is_some(){json!({"Primary":item.id})}else{json!({})},"BackdropImageTags":if item.backdrop_path.is_some(){json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})
+        }
+        pub async fn get_folder(state: &AppState, id: &str) -> Result<Value> {
+            if id == MOVIES || id == SERIES {
+                return Ok(views(state)["Items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v["Id"] == id)
+                    .unwrap()
+                    .clone());
             }
+            let item = representative(state, id).await?;
+            Ok(folder(
+                &item,
+                state,
+                series_id(item.series_name.as_deref().unwrap_or("")) != id,
+            ))
+        }
+        pub async fn list(
+            state: &AppState,
+            user: &User,
+            q: ItemQuery,
+        ) -> Result<super::dto::ItemsResponse> {
+            if q.user_id.as_ref().is_some_and(|id| id != &user.id) {
+                return Err(AppError::NotFound);
+            }
+            let rows = all(state).await?;
+            let progress: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT media_item_id,position_ticks FROM playback_sessions WHERE user_id=?",
+            )
+            .bind(&user.id)
+            .fetch_all(&state.pool)
+            .await?;
+            let positions: HashMap<_, _> = progress.into_iter().collect();
+            let parent = q.season_id.as_deref().or(q.parent_id.as_deref());
+            let mut series = BTreeMap::new();
+            let mut seasons = BTreeMap::new();
+            let mut result = Vec::new();
+            let include = q.include_item_types.as_deref().unwrap_or("");
+            let types: Vec<_> = include.split(',').filter(|s| !s.is_empty()).collect();
+            let wants = |kind: &str| types.contains(&kind);
+            let parent_series = parent.is_some_and(|p| {
+                rows.iter()
+                    .any(|i| i.series_name.as_ref().is_some_and(|s| series_id(s) == p))
+            });
+            let parent_season = parent.is_some_and(|p| {
+                rows.iter().any(|i| {
+                    i.series_name
+                        .as_ref()
+                        .is_some_and(|s| season_id(s, i.season.unwrap_or(0)) == p)
+                })
+            });
+            if let Some(p) = parent {
+                let library: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM libraries WHERE id=?")
+                    .bind(p)
+                    .fetch_one(&state.pool)
+                    .await?;
+                if p != MOVIES && p != SERIES && !parent_series && !parent_season && library == 0 {
+                    return Err(AppError::NotFound);
+                }
+            }
+            for item in &rows {
+                let name = item.series_name.as_deref().unwrap_or("Unknown series");
+                let sid = series_id(name);
+                let season = season_id(name, item.season.unwrap_or(0));
+                let in_parent = match parent {
+                    Some(MOVIES) => item.kind == "movie",
+                    Some(SERIES) => item.kind == "episode",
+                    Some(p) if parent_series => sid == p,
+                    Some(p) if parent_season => season == p,
+                    _ => true,
+                };
+                if !in_parent || q.season.is_some_and(|n| item.season != Some(n)) {
+                    continue;
+                }
+                if item.kind == "episode" {
+                    if wants("Series")
+                        || (types.is_empty() && parent == Some(SERIES) && q.recursive != Some(true))
+                    {
+                        series
+                            .entry(sid)
+                            .or_insert_with(|| folder(item, state, false));
+                    }
+                    if wants("Season") || (types.is_empty() && parent_series && q.recursive != Some(true)) {
+                        seasons
+                            .entry(season)
+                            .or_insert_with(|| folder(item, state, true));
+                    }
+                }
+                let ty = if item.kind == "movie" {
+                    "Movie"
+                } else {
+                    "Episode"
+                };
+                if wants(ty)
+                    || (types.is_empty()
+                        && (item.kind == "movie"
+                            || parent != Some(SERIES) && !parent_series
+                            || q.recursive == Some(true)))
+                {
+                    result.push(super::dto::item(
+                        item,
+                        &state.server_id,
+                        *positions.get(&item.id).unwrap_or(&0),
+                    ));
+                }
+            }
+            result.extend(series.into_values());
+            result.extend(seasons.into_values());
+            if let Some(search) = q.search_term {
+                let search = search.to_lowercase();
+                result.retain(|i| {
+                    i["Name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&search)
+                });
+            }
+            let sort = q.sort_by.as_deref().unwrap_or("SortName");
+            for field in sort.split(',').rev() {
+                let key = match field {
+                    "SortName" | "Name" => "Name",
+                    "ProductionYear" | "PremiereDate" => "ProductionYear",
+                    "IndexNumber" => "IndexNumber",
+                    "ParentIndexNumber" => "ParentIndexNumber",
+                    "Runtime" => "RunTimeTicks",
+                    _ => "Name",
+                };
+                result.sort_by(|a, b| {
+                    let ordering = if key == "Name" {
+                        a[key]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .cmp(&b[key].as_str().unwrap_or("").to_lowercase())
+                    } else {
+                        a[key].as_i64().cmp(&b[key].as_i64())
+                    };
+                    if q.sort_order.as_deref() == Some("Descending") {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                });
+            }
+            let total = result.len() as i64;
+            let offset = q.start_index.unwrap_or(0).max(0);
+            Ok(super::dto::ItemsResponse {
+                items: result
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(q.limit.unwrap_or(100).clamp(0, 1000) as usize)
+                    .collect(),
+                total_record_count: total,
+                start_index: offset,
+            })
         }
     }
+    pub mod dto;
 }
 pub mod v1;
 use axum::{extract::Request, middleware::Next, response::Response};
