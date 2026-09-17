@@ -1,229 +1,266 @@
 
 pub mod jellyfin {
-    pub mod navigation {
+    pub mod negotiation {
         
         use crate::{
-            AppState,
-            auth::User,
             db::MediaItem,
             error::{AppError, Result},
         };
         use serde::Deserialize;
         use serde_json::{Value, json};
-        use sha2::{Digest, Sha256};
-        use std::collections::{BTreeMap, HashMap};
-        pub const MOVIES: &str = "00000000000000000000000000000001";
-        pub const SERIES: &str = "00000000000000000000000000000002";
-        pub fn series_id(name: &str) -> String {
-            format!("{:x}", Sha256::digest(format!("series:{name}").as_bytes()))[..32].into()
-        }
-        pub fn season_id(name: &str, season: i64) -> String {
-            format!(
-                "{:x}",
-                Sha256::digest(format!("season:{name}:{season}").as_bytes())
-            )[..32]
-                .into()
-        }
-        pub fn views(state: &AppState) -> Value {
-            let rows:Vec<_>=[(MOVIES,"Movies","movies"),(SERIES,"Series","tvshows")].into_iter().map(|(id,name,kind)|json!({"Id":id,"Name":name,"ServerId":*state.server_id,"Type":"CollectionFolder","IsFolder":true,"CollectionType":kind,"ImageTags":{},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})).collect();
-            json!({"Items":rows,"TotalRecordCount":2,"StartIndex":0})
-        }
         #[derive(Default, Deserialize)]
         #[serde(default, rename_all = "PascalCase")]
-        pub struct ItemQuery {
-            pub start_index: Option<i64>,
-            pub limit: Option<i64>,
-            pub search_term: Option<String>,
-            pub include_item_types: Option<String>,
-            pub parent_id: Option<String>,
-            pub sort_by: Option<String>,
-            pub sort_order: Option<String>,
-            pub recursive: Option<bool>,
-            pub season_id: Option<String>,
-            pub season: Option<i64>,
-            pub user_id: Option<String>,
+        pub struct PlaybackRequest {
+            pub device_profile: Option<Value>,
+            pub audio_stream_index: Option<u64>,
+            pub subtitle_stream_index: Option<i64>,
+            pub start_time_ticks: Option<u64>,
+            pub max_streaming_bitrate: Option<u64>,
+            pub enable_direct_play: Option<bool>,
+            pub enable_direct_stream: Option<bool>,
+            pub enable_transcoding: Option<bool>,
         }
-        async fn all(state: &AppState) -> Result<Vec<MediaItem>> {
-            Ok(sqlx::query_as(
-                "SELECT * FROM media_items WHERE available=1 ORDER BY series_name,season,episode,title,id",
-            )
-            .fetch_all(&state.pool)
-            .await?)
+        fn accepts(list: &Value, codec: &str) -> bool {
+            list.as_str()
+                .is_none_or(|s| s.is_empty() || s.split(',').any(|s| s.trim().eq_ignore_ascii_case(codec)))
         }
-        pub async fn representative(state: &AppState, id: &str) -> Result<MediaItem> {
-            all(state)
-                .await?
-                .into_iter()
-                .find(|i| {
-                    i.series_name
-                        .as_ref()
-                        .is_some_and(|s| series_id(s) == id || season_id(s, i.season.unwrap_or(0)) == id)
-                })
-                .ok_or(AppError::NotFound)
-        }
-        fn folder(item: &MediaItem, state: &AppState, season: bool) -> Value {
-            let name = item.series_name.as_deref().unwrap_or("Unknown series");
-            let n = item.season.unwrap_or(0);
-            json!({"Id":if season {season_id(name,n)} else {series_id(name)},"Name":if season {format!("Season {n}")} else {name.into()},"ServerId":*state.server_id,"Type":if season {"Season"} else {"Series"},"IsFolder":true,"Overview":if season {""} else {&item.plot},"IndexNumber":if season {Some(n)} else {None},"ParentId":if season {series_id(name)} else {SERIES.into()},"SeriesId":series_id(name),"SeriesName":name,"ImageTags":if item.poster_path.is_some(){json!({"Primary":item.id})}else{json!({})},"BackdropImageTags":if item.backdrop_path.is_some(){json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})
-        }
-        pub async fn get_folder(state: &AppState, id: &str) -> Result<Value> {
-            if id == MOVIES || id == SERIES {
-                return Ok(views(state)["Items"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|v| v["Id"] == id)
-                    .unwrap()
-                    .clone());
-            }
-            let item = representative(state, id).await?;
-            Ok(folder(
-                &item,
-                state,
-                series_id(item.series_name.as_deref().unwrap_or("")) != id,
-            ))
-        }
-        pub async fn list(
-            state: &AppState,
-            user: &User,
-            q: ItemQuery,
-        ) -> Result<super::dto::ItemsResponse> {
-            if q.user_id.as_ref().is_some_and(|id| id != &user.id) {
-                return Err(AppError::NotFound);
-            }
-            let rows = all(state).await?;
-            let progress: Vec<(String, i64)> = sqlx::query_as(
-                "SELECT media_item_id,position_ticks FROM playback_sessions WHERE user_id=?",
-            )
-            .bind(&user.id)
-            .fetch_all(&state.pool)
-            .await?;
-            let positions: HashMap<_, _> = progress.into_iter().collect();
-            let parent = q.season_id.as_deref().or(q.parent_id.as_deref());
-            let mut series = BTreeMap::new();
-            let mut seasons = BTreeMap::new();
-            let mut result = Vec::new();
-            let include = q.include_item_types.as_deref().unwrap_or("");
-            let types: Vec<_> = include.split(',').filter(|s| !s.is_empty()).collect();
-            let wants = |kind: &str| types.contains(&kind);
-            let parent_series = parent.is_some_and(|p| {
-                rows.iter()
-                    .any(|i| i.series_name.as_ref().is_some_and(|s| series_id(s) == p))
-            });
-            let parent_season = parent.is_some_and(|p| {
-                rows.iter().any(|i| {
-                    i.series_name
-                        .as_ref()
-                        .is_some_and(|s| season_id(s, i.season.unwrap_or(0)) == p)
-                })
-            });
-            if let Some(p) = parent {
-                let library: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM libraries WHERE id=?")
-                    .bind(p)
-                    .fetch_one(&state.pool)
-                    .await?;
-                if p != MOVIES && p != SERIES && !parent_series && !parent_season && library == 0 {
-                    return Err(AppError::NotFound);
-                }
-            }
-            for item in &rows {
-                let name = item.series_name.as_deref().unwrap_or("Unknown series");
-                let sid = series_id(name);
-                let season = season_id(name, item.season.unwrap_or(0));
-                let in_parent = match parent {
-                    Some(MOVIES) => item.kind == "movie",
-                    Some(SERIES) => item.kind == "episode",
-                    Some(p) if parent_series => sid == p,
-                    Some(p) if parent_season => season == p,
-                    _ => true,
-                };
-                if !in_parent || q.season.is_some_and(|n| item.season != Some(n)) {
-                    continue;
-                }
-                if item.kind == "episode" {
-                    if wants("Series")
-                        || (types.is_empty() && parent == Some(SERIES) && q.recursive != Some(true))
-                    {
-                        series
-                            .entry(sid)
-                            .or_insert_with(|| folder(item, state, false));
-                    }
-                    if wants("Season") || (types.is_empty() && parent_series && q.recursive != Some(true)) {
-                        seasons
-                            .entry(season)
-                            .or_insert_with(|| folder(item, state, true));
-                    }
-                }
-                let ty = if item.kind == "movie" {
-                    "Movie"
-                } else {
-                    "Episode"
-                };
-                if wants(ty)
-                    || (types.is_empty()
-                        && (item.kind == "movie"
-                            || parent != Some(SERIES) && !parent_series
-                            || q.recursive == Some(true)))
-                {
-                    result.push(super::dto::item(
-                        item,
-                        &state.server_id,
-                        *positions.get(&item.id).unwrap_or(&0),
-                    ));
-                }
-            }
-            result.extend(series.into_values());
-            result.extend(seasons.into_values());
-            if let Some(search) = q.search_term {
-                let search = search.to_lowercase();
-                result.retain(|i| {
-                    i["Name"]
+        fn conditions(profile: &Value, video: &Value, audio: &Value, bitrate: Option<u64>) -> bool {
+            profile["Conditions"].as_array().is_none_or(|cs| {
+                cs.iter().all(|c| {
+                    let property = c["Property"].as_str().unwrap_or("");
+                    let actual = match property {
+                        "Width" => video["width"].as_f64(),
+                        "Height" => video["height"].as_f64(),
+                        "VideoBitDepth" => video["pix_fmt"].as_str().map(|p| {
+                            if p.contains("10") {
+                                10.0
+                            } else if p.contains("12") {
+                                12.0
+                            } else {
+                                8.0
+                            }
+                        }),
+                        "VideoLevel" => video["level"].as_f64(),
+                        "AudioChannels" => audio["channels"].as_f64(),
+                        "AudioSampleRate" => audio["sample_rate"].as_str().and_then(|s| s.parse().ok()),
+                        "VideoBitrate" | "AudioBitrate" => if property == "VideoBitrate" {
+                            &video["bit_rate"]
+                        } else {
+                            &audio["bit_rate"]
+                        }
                         .as_str()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&search)
-                });
-            }
-            let sort = q.sort_by.as_deref().unwrap_or("SortName");
-            for field in sort.split(',').rev() {
-                let key = match field {
-                    "SortName" | "Name" => "Name",
-                    "ProductionYear" | "PremiereDate" => "ProductionYear",
-                    "IndexNumber" => "IndexNumber",
-                    "ParentIndexNumber" => "ParentIndexNumber",
-                    "Runtime" => "RunTimeTicks",
-                    _ => "Name",
-                };
-                result.sort_by(|a, b| {
-                    let ordering = if key == "Name" {
-                        a[key]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .cmp(&b[key].as_str().unwrap_or("").to_lowercase())
-                    } else {
-                        a[key].as_i64().cmp(&b[key].as_i64())
+                        .and_then(|s| s.parse().ok()),
+                        "Bitrate" => bitrate.map(|n| n as f64),
+                        _ => None,
                     };
-                    if q.sort_order.as_deref() == Some("Descending") {
-                        ordering.reverse()
-                    } else {
-                        ordering
+                    if property == "VideoProfile" {
+                        return video["profile"]
+                            .as_str()
+                            .is_some_and(|p| match c["Condition"].as_str() {
+                                Some("Equals" | "EqualsAny") => c["Value"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .split('|')
+                                    .any(|s| s.eq_ignore_ascii_case(p)),
+                                Some("NotEquals") => {
+                                    !c["Value"].as_str().unwrap_or("").eq_ignore_ascii_case(p)
+                                }
+                                _ => false,
+                            });
                     }
-                });
-            }
-            let total = result.len() as i64;
-            let offset = q.start_index.unwrap_or(0).max(0);
-            Ok(super::dto::ItemsResponse {
-                items: result
-                    .into_iter()
-                    .skip(offset as usize)
-                    .take(q.limit.unwrap_or(100).clamp(0, 1000) as usize)
-                    .collect(),
-                total_record_count: total,
-                start_index: offset,
+                    let Some(actual) = actual else {
+                        return c["IsRequired"] == false;
+                    };
+                    let Some(expected) = c["Value"].as_str().and_then(|s| s.parse::<f64>().ok()) else {
+                        return false;
+                    };
+                    match c["Condition"].as_str() {
+                        Some("Equals") => actual == expected,
+                        Some("NotEquals") => actual != expected,
+                        Some("LessThanEqual") => actual <= expected,
+                        Some("GreaterThanEqual") => actual >= expected,
+                        _ => false,
+                    }
+                })
             })
         }
+        pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
+            let mut source = super::dto::source(item);
+            let streams: Vec<Value> = serde_json::from_str(&item.streams_json).unwrap_or_default();
+            let video = streams
+                .iter()
+                .find(|s| s["codec_type"] == "video")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let audios: Vec<_> = streams
+                .iter()
+                .filter(|s| s["codec_type"] == "audio")
+                .collect();
+            let audio = if let Some(index) = request.audio_stream_index {
+                audios
+                    .iter()
+                    .find(|s| s["index"].as_u64() == Some(index))
+                    .copied()
+                    .ok_or_else(|| AppError::BadRequest("invalid AudioStreamIndex".into()))?
+            } else {
+                audios
+                    .iter()
+                    .find(|s| s["disposition"]["default"] == 1)
+                    .copied()
+                    .or_else(|| audios.first().copied())
+                    .unwrap_or(&Value::Null)
+            };
+            let ordinal = audios.iter().position(|s| *s == audio);
+            let vc = video["codec_name"].as_str().unwrap_or("");
+            let ac = audio["codec_name"].as_str().unwrap_or("");
+            let bitrate = item
+                .runtime_seconds
+                .filter(|n| *n > 0.0)
+                .map(|n| (item.size_bytes as f64 * 8.0 / n) as u64);
+            let mut direct;
+            let mut remux = false;
+            let mut transcode = false;
+            let mut hls = false;
+            if let Some(profile) = &request.device_profile {
+                let limit = request
+                    .max_streaming_bitrate
+                    .or(profile["MaxStreamingBitrate"].as_u64());
+                let within = limit.is_none_or(|n| bitrate.is_some_and(|b| b <= n));
+                let codec_ok = profile["CodecProfiles"].as_array().is_none_or(|ps| {
+                    ps.iter().all(|p| {
+                        let codec = if p["Type"] == "Video" { vc } else { ac };
+                        !accepts(&p["Codec"], codec) || conditions(p, &video, audio, bitrate)
+                    })
+                });
+                let container_ok = profile["ContainerProfiles"].as_array().is_none_or(|ps| {
+                    ps.iter().all(|p| {
+                        !accepts(&p["Container"], &item.container) || conditions(p, &video, audio, bitrate)
+                    })
+                });
+                direct = within
+                    && codec_ok
+                    && container_ok
+                    && profile["DirectPlayProfiles"].as_array().is_some_and(|ps| {
+                        ps.iter().any(|p| {
+                            p["Type"] == "Video"
+                                && accepts(&p["Container"], &item.container)
+                                && accepts(&p["VideoCodec"], vc)
+                                && (ac.is_empty() || accepts(&p["AudioCodec"], ac))
+                        })
+                    });
+                // Negotiate only transports and output codecs actually implemented.
+                let targets: Vec<&Value> = profile["TranscodingProfiles"]
+                    .as_array()
+                    .map(|ps| {
+                        ps.iter()
+                            .filter(|p| {
+                                p["Type"] == "Video"
+                                    && p["Container"].as_str() == Some("mp4")
+                                    && p["Protocol"]
+                                        .as_str()
+                                        .is_none_or(|s| s.eq_ignore_ascii_case("http"))
+                                    && p["Context"]
+                                        .as_str()
+                                        .is_none_or(|s| s.eq_ignore_ascii_case("Streaming"))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                remux = within
+                    && codec_ok
+                    && matches!(vc, "h264" | "hevc" | "av1")
+                    && matches!(ac, "" | "aac" | "mp3" | "ac3" | "eac3" | "alac")
+                    && targets.iter().any(|p| {
+                        accepts(&p["VideoCodec"], vc) && (ac.is_empty() || accepts(&p["AudioCodec"], ac))
+                    });
+                // The initial beta encoder targets 4Mbps video + 192kbps audio and does not
+                // claim to satisfy lower bitrate limits or unsupported output conditions.
+                hls = item
+                    .runtime_seconds
+                    .is_some_and(|n| n > 0.0 && n <= 604800.0)
+                    && profile["TranscodingProfiles"].as_array().is_some_and(|ps| {
+                        ps.iter().any(|p| {
+                            p["Type"] == "Video"
+                                && p["Protocol"]
+                                    .as_str()
+                                    .is_some_and(|s| s.eq_ignore_ascii_case("hls"))
+                                && accepts(&p["Container"], "ts")
+                                && accepts(&p["VideoCodec"], "h264")
+                                && accepts(&p["AudioCodec"], "aac")
+                        })
+                    });
+                transcode = limit.is_none_or(|n| n >= 4_192_000)
+                    && (hls
+                        || targets.iter().any(|p| {
+                            accepts(&p["VideoCodec"], "h264") && accepts(&p["AudioCodec"], "aac")
+                        }))
+                    && !vc.is_empty();
+            } else {
+                // GET PlaybackInfo without a device profile is metadata discovery; clients
+                // decide whether they can decode the original file themselves.
+                direct = true;
+            }
+            direct &= request.enable_direct_play != Some(false);
+            remux &= request.enable_direct_stream != Some(false);
+            transcode &= request.enable_transcoding != Some(false);
+            source["SupportsDirectPlay"] = json!(direct);
+            source["SupportsDirectStream"] = json!(direct || remux);
+            source["SupportsTranscoding"] = json!(transcode);
+            source["DefaultAudioStreamIndex"] = audio["index"].clone();
+            source["DefaultSubtitleStreamIndex"] = json!(request.subtitle_stream_index.unwrap_or(-1));
+            source["Bitrate"] = json!(bitrate);
+            if remux || transcode {
+                let mode = if remux { "remux" } else { "transcode" };
+                let mut url = format!(
+                    "/Videos/{}/stream.mp4?mode={mode}&StartTimeTicks={}",
+                    item.id,
+                    request.start_time_ticks.unwrap_or(0)
+                );
+                let use_hls = hls && !remux;
+                if use_hls {
+                    url = format!(
+                        "/Videos/{}/master.m3u8?StartTimeTicks={}",
+                        item.id,
+                        request.start_time_ticks.unwrap_or(0)
+                    );
+                }
+                if let Some(n) = ordinal {
+                    url.push_str(&format!("&audio_index={n}"));
+                }
+                if remux && !direct {
+                    source["DirectStreamUrl"] = json!(url);
+                }
+                source["TranscodingUrl"] = json!(url);
+                source["TranscodingContainer"] = json!(if use_hls { "ts" } else { "mp4" });
+                source["TranscodingSubProtocol"] = json!(if use_hls { "hls" } else { "http" });
+            }
+            Ok(source)
+        }
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            #[test]
+            fn profile_constraints_are_conservative() {
+                let video = json!({"width":1920,"height":1080,"pix_fmt":"yuv420p10le"});
+                let audio = json!({"channels":6});
+                assert!(!conditions(
+                    &json!({"Conditions":[{"Property":"VideoBitDepth","Condition":"LessThanEqual","Value":"8","IsRequired":true}]}),
+                    &video,
+                    &audio,
+                    None
+                ));
+                assert!(!conditions(
+                    &json!({"Conditions":[{"Property":"Unknown","Condition":"Equals","Value":"1","IsRequired":true}]}),
+                    &video,
+                    &audio,
+                    None
+                ));
+                assert!(accepts(&json!("h264,hevc"), "hevc"));
+                assert!(!accepts(&json!("h264"), "hevc"));
+            }
+        }
     }
+    pub mod navigation;
     pub mod dto;
 }
 pub mod v1;
