@@ -1,267 +1,297 @@
 
 pub mod jellyfin {
-    pub mod negotiation {
-        
-        use crate::{
-            db::MediaItem,
-            error::{AppError, Result},
-        };
-        use serde::Deserialize;
-        use serde_json::{Value, json};
-        #[derive(Default, Deserialize)]
-        #[serde(default, rename_all = "PascalCase")]
-        pub struct PlaybackRequest {
-            pub device_profile: Option<Value>,
-            pub audio_stream_index: Option<u64>,
-            pub subtitle_stream_index: Option<i64>,
-            pub start_time_ticks: Option<u64>,
-            pub max_streaming_bitrate: Option<u64>,
-            pub enable_direct_play: Option<bool>,
-            pub enable_direct_stream: Option<bool>,
-            pub enable_transcoding: Option<bool>,
-        }
-        fn accepts(list: &Value, codec: &str) -> bool {
-            list.as_str()
-                .is_none_or(|s| s.is_empty() || s.split(',').any(|s| s.trim().eq_ignore_ascii_case(codec)))
-        }
-        fn conditions(profile: &Value, video: &Value, audio: &Value, bitrate: Option<u64>) -> bool {
-            profile["Conditions"].as_array().is_none_or(|cs| {
-                cs.iter().all(|c| {
-                    let property = c["Property"].as_str().unwrap_or("");
-                    let actual = match property {
-                        "Width" => video["width"].as_f64(),
-                        "Height" => video["height"].as_f64(),
-                        "VideoBitDepth" => video["pix_fmt"].as_str().map(|p| {
-                            if p.contains("10") {
-                                10.0
-                            } else if p.contains("12") {
-                                12.0
-                            } else {
-                                8.0
-                            }
-                        }),
-                        "VideoLevel" => video["level"].as_f64(),
-                        "AudioChannels" => audio["channels"].as_f64(),
-                        "AudioSampleRate" => audio["sample_rate"].as_str().and_then(|s| s.parse().ok()),
-                        "VideoBitrate" | "AudioBitrate" => if property == "VideoBitrate" {
-                            &video["bit_rate"]
-                        } else {
-                            &audio["bit_rate"]
-                        }
-                        .as_str()
-                        .and_then(|s| s.parse().ok()),
-                        "Bitrate" => bitrate.map(|n| n as f64),
-                        _ => None,
-                    };
-                    if property == "VideoProfile" {
-                        return video["profile"]
-                            .as_str()
-                            .is_some_and(|p| match c["Condition"].as_str() {
-                                Some("Equals" | "EqualsAny") => c["Value"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .split('|')
-                                    .any(|s| s.eq_ignore_ascii_case(p)),
-                                Some("NotEquals") => {
-                                    !c["Value"].as_str().unwrap_or("").eq_ignore_ascii_case(p)
-                                }
-                                _ => false,
-                            });
-                    }
-                    let Some(actual) = actual else {
-                        return c["IsRequired"] == false;
-                    };
-                    let Some(expected) = c["Value"].as_str().and_then(|s| s.parse::<f64>().ok()) else {
-                        return false;
-                    };
-                    match c["Condition"].as_str() {
-                        Some("Equals") => actual == expected,
-                        Some("NotEquals") => actual != expected,
-                        Some("LessThanEqual") => actual <= expected,
-                        Some("GreaterThanEqual") => actual >= expected,
-                        _ => false,
-                    }
-                })
-            })
-        }
-        pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
-            let mut source = super::dto::source(item);
-            let streams: Vec<Value> = serde_json::from_str(&item.streams_json).unwrap_or_default();
-            let video = streams
-                .iter()
-                .find(|s| s["codec_type"] == "video")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let audios: Vec<_> = streams
-                .iter()
-                .filter(|s| s["codec_type"] == "audio")
-                .collect();
-            let audio = if let Some(index) = request.audio_stream_index {
-                audios
-                    .iter()
-                    .find(|s| s["index"].as_u64() == Some(index))
-                    .copied()
-                    .ok_or_else(|| AppError::BadRequest("invalid AudioStreamIndex".into()))?
-            } else {
-                audios
-                    .iter()
-                    .find(|s| s["disposition"]["default"] == 1)
-                    .copied()
-                    .or_else(|| audios.first().copied())
-                    .unwrap_or(&Value::Null)
-            };
-            let ordinal = audios.iter().position(|s| *s == audio);
-            let vc = video["codec_name"].as_str().unwrap_or("");
-            let ac = audio["codec_name"].as_str().unwrap_or("");
-            let bitrate = item
-                .runtime_seconds
-                .filter(|n| *n > 0.0)
-                .map(|n| (item.size_bytes as f64 * 8.0 / n) as u64);
-            let mut direct;
-            let mut remux = false;
-            let mut transcode = false;
-            let mut hls = false;
-            if let Some(profile) = &request.device_profile {
-                let limit = request
-                    .max_streaming_bitrate
-                    .or(profile["MaxStreamingBitrate"].as_u64());
-                let within = limit.is_none_or(|n| bitrate.is_some_and(|b| b <= n));
-                let codec_ok = profile["CodecProfiles"].as_array().is_none_or(|ps| {
-                    ps.iter().all(|p| {
-                        let codec = if p["Type"] == "Video" { vc } else { ac };
-                        !accepts(&p["Codec"], codec) || conditions(p, &video, audio, bitrate)
-                    })
-                });
-                let container_ok = profile["ContainerProfiles"].as_array().is_none_or(|ps| {
-                    ps.iter().all(|p| {
-                        !accepts(&p["Container"], &item.container) || conditions(p, &video, audio, bitrate)
-                    })
-                });
-                direct = within
-                    && codec_ok
-                    && container_ok
-                    && profile["DirectPlayProfiles"].as_array().is_some_and(|ps| {
-                        ps.iter().any(|p| {
-                            p["Type"] == "Video"
-                                && accepts(&p["Container"], &item.container)
-                                && accepts(&p["VideoCodec"], vc)
-                                && (ac.is_empty() || accepts(&p["AudioCodec"], ac))
-                        })
-                    });
-                // Negotiate only transports and output codecs actually implemented.
-                let targets: Vec<&Value> = profile["TranscodingProfiles"]
-                    .as_array()
-                    .map(|ps| {
-                        ps.iter()
-                            .filter(|p| {
-                                p["Type"] == "Video"
-                                    && p["Container"].as_str() == Some("mp4")
-                                    && p["Protocol"]
-                                        .as_str()
-                                        .is_none_or(|s| s.eq_ignore_ascii_case("http"))
-                                    && p["Context"]
-                                        .as_str()
-                                        .is_none_or(|s| s.eq_ignore_ascii_case("Streaming"))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                remux = within
-                    && codec_ok
-                    && matches!(vc, "h264" | "hevc" | "av1")
-                    && matches!(ac, "" | "aac" | "mp3" | "ac3" | "eac3" | "alac")
-                    && targets.iter().any(|p| {
-                        accepts(&p["VideoCodec"], vc) && (ac.is_empty() || accepts(&p["AudioCodec"], ac))
-                    });
-                // The initial beta encoder targets 4Mbps video + 192kbps audio and does not
-                // claim to satisfy lower bitrate limits or unsupported output conditions.
-                hls = item
-                    .runtime_seconds
-                    .is_some_and(|n| n > 0.0 && n <= 604800.0)
-                    && profile["TranscodingProfiles"].as_array().is_some_and(|ps| {
-                        ps.iter().any(|p| {
-                            p["Type"] == "Video"
-                                && p["Protocol"]
-                                    .as_str()
-                                    .is_some_and(|s| s.eq_ignore_ascii_case("hls"))
-                                && accepts(&p["Container"], "ts")
-                                && accepts(&p["VideoCodec"], "h264")
-                                && accepts(&p["AudioCodec"], "aac")
-                        })
-                    });
-                transcode = limit.is_none_or(|n| n >= 4_192_000)
-                    && (hls
-                        || targets.iter().any(|p| {
-                            accepts(&p["VideoCodec"], "h264") && accepts(&p["AudioCodec"], "aac")
-                        }))
-                    && !vc.is_empty();
-            } else {
-                // GET PlaybackInfo without a device profile is metadata discovery; clients
-                // decide whether they can decode the original file themselves.
-                direct = true;
-            }
-            direct &= request.enable_direct_play != Some(false);
-            remux &= request.enable_direct_stream != Some(false);
-            transcode &= request.enable_transcoding != Some(false);
-            source["SupportsDirectPlay"] = json!(direct);
-            source["SupportsDirectStream"] = json!(direct || remux);
-            source["SupportsTranscoding"] = json!(transcode);
-            source["DefaultAudioStreamIndex"] = audio["index"].clone();
-            source["DefaultSubtitleStreamIndex"] = json!(request.subtitle_stream_index.unwrap_or(-1));
-            source["Bitrate"] = json!(bitrate);
-            if remux || transcode {
-                let mode = if remux { "remux" } else { "transcode" };
-                let mut url = format!(
-                    "/Videos/{}/stream.mp4?mode={mode}&StartTimeTicks={}",
-                    item.id,
-                    request.start_time_ticks.unwrap_or(0)
-                );
-                let use_hls = hls && !remux;
-                if use_hls {
-                    url = format!(
-                        "/Videos/{}/master.m3u8?StartTimeTicks={}",
-                        item.id,
-                        request.start_time_ticks.unwrap_or(0)
-                    );
-                }
-                if let Some(n) = ordinal {
-                    url.push_str(&format!("&audio_index={n}"));
-                }
-                if remux && !direct {
-                    source["DirectStreamUrl"] = json!(url);
-                }
-                source["TranscodingUrl"] = json!(url);
-                source["TranscodingContainer"] = json!(if use_hls { "ts" } else { "mp4" });
-                source["TranscodingSubProtocol"] = json!(if use_hls { "hls" } else { "http" });
-            }
-            Ok(source)
-        }
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-            #[test]
-            fn profile_constraints_are_conservative() {
-                let video = json!({"width":1920,"height":1080,"pix_fmt":"yuv420p10le"});
-                let audio = json!({"channels":6});
-                assert!(!conditions(
-                    &json!({"Conditions":[{"Property":"VideoBitDepth","Condition":"LessThanEqual","Value":"8","IsRequired":true}]}),
-                    &video,
-                    &audio,
-                    None
-                ));
-                assert!(!conditions(
-                    &json!({"Conditions":[{"Property":"Unknown","Condition":"Equals","Value":"1","IsRequired":true}]}),
-                    &video,
-                    &audio,
-                    None
-                ));
-                assert!(accepts(&json!("h264,hevc"), "hevc"));
-                assert!(!accepts(&json!("h264"), "hevc"));
-            }
+    
+    pub mod dto;
+    pub mod navigation;
+    pub mod negotiation;
+    use crate::{
+        AppState,
+        api::v1::{Progress, save_progress},
+        auth::{self, Credentials, User},
+        db,
+        error::{AppError, Result},
+        streaming,
+    };
+    use axum::{
+        Extension, Json, Router,
+        extract::{Path, Query, State},
+        http::{StatusCode, header},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+    };
+    use navigation::ItemQuery;
+    use serde::Deserialize;
+    use serde_json::{Value, json};
+    
+    pub fn public_router() -> Router<AppState> {
+        Router::new()
+            .route("/System/Info/Public", get(info))
+            .route("/Users/AuthenticateByName", post(login))
+            .route("/Users/Public", get(|| async { Json(json!([])) }))
+    }
+    pub fn protected_router() -> Router<AppState> {
+        Router::new()
+            .route("/System/Info", get(info))
+            .route("/Users/Me", get(me))
+            .route("/Users/{id}", get(user))
+            .route("/UserViews", get(root_views))
+            .route("/Users/{id}/Views", get(views))
+            .route("/Shows/{id}/Seasons", get(seasons))
+            .route("/Shows/{id}/Episodes", get(episodes))
+            .route(
+                "/Sessions/Capabilities/Full",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/Sessions/Capabilities",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route("/Users/{id}/Items", get(user_items))
+            .route("/Users/{user_id}/Items/{id}", get(user_item))
+            .route("/Items", get(items))
+            .route("/Items/{id}", get(item))
+            .route(
+                "/Items/{id}/PlaybackInfo",
+                get(playback_info).post(playback_info),
+            )
+            .route("/Items/{id}/Images/Primary", get(streaming::poster))
+            .route("/Items/{id}/Images/Backdrop", get(streaming::backdrop))
+            .route("/Items/{id}/Images/Backdrop/0", get(streaming::backdrop))
+            .route("/Items/{id}/Images/Primary/0", get(streaming::poster))
+            .route(
+                "/Videos/{id}/{source}/Subtitles/{index}/Stream.vtt",
+                get(streaming::subtitles::jellyfin),
+            )
+            .route("/Videos/{id}/master.m3u8", get(streaming::hls::playlist))
+            .route("/Videos/{id}/hls/{segment}", get(streaming::hls::segment))
+            .route("/Videos/{id}/stream", get(streaming::stream))
+            .route("/Videos/{id}/stream.mp4", get(streaming::stream))
+            .route("/Sessions/Playing", post(playing))
+            .route("/Sessions/Playing/Progress", post(playing))
+            .route("/Sessions/Playing/Stopped", post(stopped))
+            .route("/Sessions/Logout", post(auth::logout))
+    }
+    async fn info(State(state): State<AppState>) -> Json<Value> {
+        Json(
+            json!({"Id":*state.server_id,"ServerName":"Medienserver","Version":"10.10.7","ServerVersion":env!("CARGO_PKG_VERSION"),"ProductName":"Medienserver","OperatingSystem":std::env::consts::OS,"StartupWizardCompleted":true}),
+        )
+    }
+    async fn login(
+        State(state): State<AppState>,
+        Json(credentials): Json<Credentials>,
+    ) -> Result<Response> {
+        let (user, token) = auth::authenticate(&state, credentials).await?;
+        Ok(([(header::SET_COOKIE,auth::cookie(&state,&token,604800))], Json(json!({"User":dto::user(&user,&state.server_id),"AccessToken":token,"ServerId":*state.server_id,"SessionInfo":{"Id":uuid::Uuid::new_v4().simple().to_string(),"UserId":user.id,"UserName":user.username,"ServerId":*state.server_id}}))).into_response())
+    }
+    fn check_user(id: &str, user: &User) -> Result<()> {
+        if id == user.id {
+            Ok(())
+        } else {
+            Err(AppError::NotFound)
         }
     }
-    pub mod navigation;
-    pub mod dto;
+    async fn me(State(state): State<AppState>, Extension(user): Extension<User>) -> Json<Value> {
+        Json(dto::user(&user, &state.server_id))
+    }
+    async fn user(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Path(id): Path<String>,
+    ) -> Result<Json<Value>> {
+        check_user(&id, &user)?;
+        Ok(Json(dto::user(&user, &state.server_id)))
+    }
+    async fn views(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Path(id): Path<String>,
+    ) -> Result<Json<Value>> {
+        check_user(&id, &user)?;
+        Ok(Json(navigation::views(&state)))
+    }
+    async fn root_views(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Query(q): Query<ItemQuery>,
+    ) -> Result<Json<Value>> {
+        if let Some(id) = q.user_id {
+            check_user(&id, &user)?;
+        }
+        Ok(Json(navigation::views(&state)))
+    }
+    async fn list(state: &AppState, user: &User, q: ItemQuery) -> Result<Json<dto::ItemsResponse>> {
+        navigation::list(state, user, q).await.map(Json)
+    }
+    async fn seasons(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Path(id): Path<String>,
+        Query(mut q): Query<ItemQuery>,
+    ) -> Result<Json<dto::ItemsResponse>> {
+        q.parent_id = Some(id);
+        q.include_item_types = Some("Season".into());
+        list(&state, &user, q).await
+    }
+    async fn episodes(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Path(id): Path<String>,
+        Query(mut q): Query<ItemQuery>,
+    ) -> Result<Json<dto::ItemsResponse>> {
+        q.parent_id = Some(id);
+        q.include_item_types = Some("Episode".into());
+        q.sort_by
+            .get_or_insert("ParentIndexNumber,IndexNumber".into());
+        list(&state, &user, q).await
+    }
+    async fn items(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Query(q): Query<ItemQuery>,
+    ) -> Result<Json<dto::ItemsResponse>> {
+        list(&state, &user, q).await
+    }
+    async fn user_items(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Path(id): Path<String>,
+        Query(q): Query<ItemQuery>,
+    ) -> Result<Json<dto::ItemsResponse>> {
+        check_user(&id, &user)?;
+        list(&state, &user, q).await
+    }
+    async fn get_item(state: &AppState, user: &User, id: &str) -> Result<Json<Value>> {
+        let item = match db::item(&state.pool, id).await {
+            Ok(item) => item,
+            Err(AppError::NotFound) => return navigation::get_folder(state, id).await.map(Json),
+            Err(e) => return Err(e),
+        };
+        let position: Option<i64> = sqlx::query_scalar(
+            "SELECT position_ticks FROM playback_sessions WHERE user_id=? AND media_item_id=?",
+        )
+        .bind(&user.id)
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+        Ok(Json(dto::item(
+            &item,
+            &state.server_id,
+            position.unwrap_or(0),
+        )))
+    }
+    async fn item(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Path(id): Path<String>,
+    ) -> Result<Json<Value>> {
+        get_item(&state, &user, &id).await
+    }
+    async fn user_item(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Path((uid, id)): Path<(String, String)>,
+    ) -> Result<Json<Value>> {
+        check_user(&uid, &user)?;
+        get_item(&state, &user, &id).await
+    }
+    async fn playback_info(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+        Extension(token): Extension<auth::MediaToken>,
+        Query(query): Query<negotiation::PlaybackRequest>,
+        body: Option<Json<negotiation::PlaybackRequest>>,
+    ) -> Result<Json<Value>> {
+        let item = db::item(&state.pool, &id).await?;
+        let mut request = body.map(|j| j.0).unwrap_or_default();
+        request.audio_stream_index = request.audio_stream_index.or(query.audio_stream_index);
+        request.subtitle_stream_index = request
+            .subtitle_stream_index
+            .or(query.subtitle_stream_index);
+        request.start_time_ticks = request.start_time_ticks.or(query.start_time_ticks);
+        request.max_streaming_bitrate = request
+            .max_streaming_bitrate
+            .or(query.max_streaming_bitrate);
+        let mut source = negotiation::source(&item, &request)?;
+        let encoded: String =
+            reqwest::Url::parse_with_params("http://localhost", &[("api_key", &token.0)])
+                .unwrap()
+                .query()
+                .unwrap()
+                .into();
+        for key in ["TranscodingUrl", "DirectStreamUrl"] {
+            if let Some(url) = source[key].as_str() {
+                source[key] = json!(format!(
+                    "{url}{}{encoded}",
+                    if url.contains('?') { "&" } else { "?" }
+                ));
+            }
+        }
+        if let Some(streams) = source["MediaStreams"].as_array_mut() {
+            for stream in streams {
+                if let Some(url) = stream["DeliveryUrl"].as_str() {
+                    stream["DeliveryUrl"] = json!(format!("{url}?{encoded}"));
+                }
+            }
+        }
+        let playable = source["SupportsDirectPlay"] == true
+            || source["SupportsDirectStream"] == true
+            || source["SupportsTranscoding"] == true;
+        let mut result =
+            json!({"MediaSources":[source],"PlaySessionId":uuid::Uuid::new_v4().simple().to_string()});
+        if !playable {
+            result["ErrorCode"] = json!("NoCompatibleStream");
+        }
+        Ok(Json(result))
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Playing {
+        item_id: String,
+        #[serde(default)]
+        position_ticks: i64,
+        #[serde(default)]
+        is_paused: bool,
+    }
+    async fn playing(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Json(p): Json<Playing>,
+    ) -> Result<StatusCode> {
+        save_progress(
+            &state,
+            &user,
+            Progress {
+                profile_id: None,
+                completed: None,
+                item_id: p.item_id,
+                position_ticks: p.position_ticks,
+                is_paused: p.is_paused,
+                stopped: false,
+            },
+        )
+        .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
+    async fn stopped(
+        State(state): State<AppState>,
+        Extension(user): Extension<User>,
+        Json(p): Json<Playing>,
+    ) -> Result<StatusCode> {
+        save_progress(
+            &state,
+            &user,
+            Progress {
+                profile_id: None,
+                completed: None,
+                item_id: p.item_id,
+                position_ticks: p.position_ticks,
+                is_paused: true,
+                stopped: true,
+            },
+        )
+        .await?;
+        Ok(StatusCode::NO_CONTENT)
+    }
 }
 pub mod v1;
 use axum::{extract::Request, middleware::Next, response::Response};
