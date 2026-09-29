@@ -4,53 +4,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod db;
-pub mod diagnostics {
-    use std::{
-        collections::VecDeque,
-        sync::{LazyLock, Mutex},
-    };
-    static EVENTS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
-    pub fn event(text: &str) {
-        if let Ok(mut q) = EVENTS.lock() {
-            if q.len() >= 100 {
-                q.pop_front();
-            }
-            q.push_back(format!(
-                "{} · {}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                text
-            ));
-        }
-    }
-    pub fn recent() -> Vec<String> {
-        EVENTS
-            .lock()
-            .map(|q| q.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-    
-    pub struct LogLayer;
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogLayer {
-        fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-            struct Message(String);
-            impl tracing::field::Visit for Message {
-                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-                    if f.name() == "message" {
-                        self.0 = format!("{v:?}")
-                    }
-                }
-            }
-            let mut m = Message(String::new());
-            e.record(&mut m);
-            if !m.0.is_empty() {
-                event(&format!("{} · {}", e.metadata().level(), m.0));
-            }
-        }
-    }
-}
+pub mod diagnostics;
 pub mod error;
 pub mod scanner;
 pub mod streaming;
