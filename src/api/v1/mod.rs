@@ -2,7 +2,7 @@
 
 pub mod hierarchy;
 
-
+pub mod settings;
 use crate::{
     AppState,
     auth::{self, User},
