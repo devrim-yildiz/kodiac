@@ -1,6 +1,6 @@
 [package]
 name = "medienserver"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Personal media streaming server with an embedded web client and Jellyfin compatibility"

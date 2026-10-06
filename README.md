@@ -79,3 +79,8 @@ Medienserver resolves it to `0:a:N` for FFmpeg and embeds that ordinal in negoti
 URLs. Invalid indices return 400. `StartTimeTicks`, resume positions and runtime
 use 100-nanosecond units. Playback reports persist across restart.
 
+
+## Browser development
+
+Run `npm ci --prefix web` and `npm run build --prefix web` before compiling Rust.
+The browser client uses typed native APIs and a shared playback engine.
