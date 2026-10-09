@@ -8,6 +8,7 @@ export default function App() {
   const [selected, setSelected] = useState<Title | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
+  const [paused, setPaused] = useState(false);
   useEffect(() => {
     const abort = new AbortController();
     api<{items: Title[]}>("/api/v1/items", {signal: abort.signal})
@@ -23,7 +24,7 @@ export default function App() {
       <img src={item.poster_url || ""} alt="" /><h2>{item.title}</h2><p>{item.year}</p>
     </button>)}</section>
     {selected && <section className="prototype-player"><button onClick={() => setSelected(null)}>Close</button>
-      <h2>{selected.title}</h2><video key={selected.id} controls autoPlay src={`/api/v1/items/${selected.id}/stream`} />
+      <h2>{selected.title}</h2><button onClick={() => setPaused(!paused)}>{paused ? "Resume" : "Pause"}</button><video data-paused={paused} key={selected.id} controls autoPlay src={`/api/v1/items/${selected.id}/stream`} />
     </section>}
   </main>;
 }
