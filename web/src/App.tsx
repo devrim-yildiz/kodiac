@@ -1,10 +1,11 @@
-import * as inlineShowPageDependency0 from "./components/Immersion";
-import * as inlineShowPageDependency1 from "react";
-import * as inlineShowPageDependency2 from "@radix-ui/react-tabs";
-import * as inlineShowPageDependency3 from "lucide-react";
-import * as inlineShowPageDependency4 from "./api";
-import * as inlineShowPageDependency6 from "./types";
-import * as inlineShowPageDependency7 from "./components/shared";
+import * as inlineMovieSheetDependency0 from "react";
+import * as inlineMovieSheetDependency1 from "@radix-ui/react-dialog";
+import * as inlineMovieSheetDependency2 from "lucide-react";
+import * as inlineMovieSheetDependency3 from "./components/useSpatialPresence";
+import * as inlineMovieSheetDependency4 from "./api";
+import * as inlineMovieSheetDependency6 from "./types";
+import * as inlineMovieSheetDependency7 from "./components/shared";
+import ShowPage from "./components/ShowPage";
 import { useEffect, useState } from "react";
 import type { Title } from "./types";
 import { api } from "./api";
@@ -36,227 +37,158 @@ export default function App() {
   </main>;
 }
 
-const ShowPage = (() => {
-const ThemeMusic = inlineShowPageDependency0.ThemeMusic;
-const useEffect = inlineShowPageDependency1.useEffect;
-const useState = inlineShowPageDependency1.useState;
-const Tabs = inlineShowPageDependency2;
-const ArrowLeft = inlineShowPageDependency3.ArrowLeft;
-const Play = inlineShowPageDependency3.Play;
-const allPages = inlineShowPageDependency4.allPages;
-const aborted = inlineShowPageDependency4.aborted;
-const message = inlineShowPageDependency4.message;
-type Season = import("./types").Season;
+const MovieSheet = (() => {
+const useEffect = inlineMovieSheetDependency0.useEffect;
+const useState = inlineMovieSheetDependency0.useState;
+const Dialog = inlineMovieSheetDependency1;
+const AudioLines = inlineMovieSheetDependency2.AudioLines;
+const Captions = inlineMovieSheetDependency2.Captions;
+const Film = inlineMovieSheetDependency2.Film;
+const Play = inlineMovieSheetDependency2.Play;
+const X = inlineMovieSheetDependency2.X;
+const useSpatialPresence = inlineMovieSheetDependency3.useSpatialPresence;
+const api = inlineMovieSheetDependency4.api;
+const aborted = inlineMovieSheetDependency4.aborted;
+const message = inlineMovieSheetDependency4.message;
 type Title = import("./types").Title;
-const episodeCode = inlineShowPageDependency6.episodeCode;
-const idPath = inlineShowPageDependency6.idPath;
-const runtime = inlineShowPageDependency6.runtime;
-const Artwork = inlineShowPageDependency7.Artwork;
-const Empty = inlineShowPageDependency7.Empty;
-const Genres = inlineShowPageDependency7.Genres;
-const Loading = inlineShowPageDependency7.Loading;
-const Meta = inlineShowPageDependency7.Meta;
-const SectionHeading = inlineShowPageDependency7.SectionHeading;
+const idPath = inlineMovieSheetDependency6.idPath;
+const Artwork = inlineMovieSheetDependency7.Artwork;
+const Genres = inlineMovieSheetDependency7.Genres;
+const Meta = inlineMovieSheetDependency7.Meta;
+const useSource = inlineMovieSheetDependency7.useSource;
 
 
-function ShowPage({
-  show,
-  onBack,
+function MovieSheet({
+  movie,
+  open,
+  onClose,
   onPlay,
 }: {
-  show: Title;
-  onBack: () => void;
-  onPlay: (item: Title) => void;
+  movie: Title;
+  open: boolean;
+  onClose: () => void;
+  onPlay: (movie: Title) => void;
 }) {
-  const [seasons, setSeasons] = useState<Season[]>([]);
-  const [selected, setSelected] = useState("");
-  const [episodes, setEpisodes] = useState<Title[]>([]);
-  const [loading, setLoading] = useState(true);
+  const spatial = useSpatialPresence(open);
+  const [detail, setDetail] = useState(movie);
   const [error, setError] = useState("");
-  const [retry, setRetry] = useState(0);
+  const source = useSource(movie.id);
   useEffect(() => {
     const controller = new AbortController();
-    allPages<Season>(
-      `/api/v1/shows/${idPath(show.id)}/seasons`,
-      controller.signal,
-    )
-      .then((items) => {
-        setSeasons(items);
-        setSelected(
-          (items.find((season) => (season.season_number ?? 0) > 0) || items[0])
-            ?.id || "",
-        );
-        if (!items.length) setLoading(false);
-      })
+    api<Title>(`/api/v1/movies/${idPath(movie.id)}`, {
+      signal: controller.signal,
+    })
+      .then(setDetail)
       .catch((error) => {
-        if (!aborted(error)) {
-          setError(message(error));
-          setLoading(false);
-        }
+        if (!aborted(error)) setError(message(error));
       });
     return () => controller.abort();
-  }, [show.id, retry]);
-  useEffect(() => {
-    if (!selected) return;
-    const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    setEpisodes([]);
-    allPages<Title>(
-      `/api/v1/seasons/${idPath(selected)}/episodes`,
-      controller.signal,
-    )
-      .then((items) => {
-        setEpisodes(items);
-        setLoading(false);
-      })
-      .catch((error) => {
-        if (!aborted(error)) {
-          setError(message(error));
-          setLoading(false);
-        }
-      });
-    return () => controller.abort();
-  }, [selected, retry]);
-  const season = seasons.find((s) => s.id === selected);
-  const play = (item: Title) =>
-    onPlay({
-      ...item,
-      show_id: show.id,
-      show_title: show.title,
-      season_number: season?.season_number,
-    });
+  }, [movie.id]);
+  const audio =
+    source?.MediaStreams.filter((stream) => stream.Type === "Audio") || [];
+  const subtitles =
+    source?.MediaStreams.filter((stream) => stream.Type === "Subtitle") || [];
   return (
-    <main className="show-page">
-      <ThemeMusic showId={show.id} title={show.title} />
-      <section className="hero show-hero">
-        <Artwork
-          src={
-            show.backdrop_url ||
-            show.poster_url ||
-            `/api/v1/shows/${idPath(show.id)}/images/backdrop`
-          }
-          className="hero-art"
-          eager
-        />
-        <div className="hero-shade" />
-        <div className="hero-content">
-          <button className="back-link" onClick={onBack}>
-            <ArrowLeft size={17} /> Back to library
-          </button>
-          <Genres item={show} />
-          <h1>{show.title}</h1>
-          <Meta item={show} />
-          <p className="hero-overview">
-            {show.overview || "No series synopsis available yet."}
-          </p>
-          {episodes.length > 0 && (
+    <Dialog.Root
+      open={spatial.present}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay ref={spatial.overlay} className="dialog-overlay" />
+        <Dialog.Content
+          ref={spatial.panel}
+          className="movie-sheet glass"
+          aria-describedby="movie-synopsis"
+        >
+          <div className="sheet-art">
+            <Artwork src={detail.backdrop_url || detail.poster_url} eager />
+            <div className="sheet-shade" />
+          </div>
+          <Dialog.Close
+            className="sheet-close icon-button glass"
+            aria-label="Close movie details"
+          >
+            <X size={21} />
+          </Dialog.Close>
+          <div className="sheet-body">
+            <Genres item={detail} />
+            <Dialog.Title>{detail.title}</Dialog.Title>
+            <Meta item={detail} source={source} />
             <button
               className="primary-button"
-              onClick={() => play(episodes[0])}
+              disabled={Boolean(error)}
+              onClick={() => onPlay(detail)}
             >
-              <Play size={18} fill="currentColor" /> Watch / Resume
+              <Play size={18} fill="currentColor" /> Play / Resume
             </button>
-          )}
-        </div>
-      </section>
-      <section className="content-width episode-section">
-        <SectionHeading
-          eyebrow="ONE MORE EPISODE"
-          title="The story continues"
-          count={String(show.episode_count || episodes.length)}
-        />
-        {seasons.length > 0 && (
-          <Tabs.Root value={selected} onValueChange={setSelected}>
-            <Tabs.List className="season-pills" aria-label="Select season">
-              {seasons.map((season) => (
-                <Tabs.Trigger
-                  key={season.id}
-                  className="season-pill"
-                  value={season.id}
-                >
-                  {season.season_number === 0
-                    ? "Specials"
-                    : season.season_number == null
-                      ? "Other episodes"
-                      : `Season ${season.season_number}`}
-                </Tabs.Trigger>
-              ))}
-            </Tabs.List>
-          </Tabs.Root>
-        )}
-        {season?.overview && (
-          <p className="season-overview">{season.overview}</p>
-        )}
-        {error && (
-          <Empty title="Episodes could not load">
-            {error}
-            <button
-              className="secondary-button"
-              onClick={() => setRetry((n) => n + 1)}
-            >
-              Try again
-            </button>
-          </Empty>
-        )}
-        {loading ? (
-          <Loading label="Loading episodes…" />
-        ) : !error && !episodes.length ? (
-          <Empty title="No episodes available">
-            This season has no available episode files.
-          </Empty>
-        ) : (
-          <div className="episode-list">
-            {episodes.map((item, index) => (
-              <article className="episode-row" key={item.id}>
-                <span className="episode-ordinal">
-                  {String(index + 1).padStart(2, "0")}
+            <Dialog.Description id="movie-synopsis" className="sheet-synopsis">
+              {detail.overview || "No synopsis available yet."}
+            </Dialog.Description>
+            {error && (
+              <p className="inline-error" role="alert">
+                {error}
+              </p>
+            )}
+            <div className="spec-grid">
+              <div>
+                <span>
+                  <Film size={15} /> VIDEO
                 </span>
-                <button
-                  className="episode-image"
-                  onClick={() => play(item)}
-                  aria-label={`Play ${item.title}`}
-                >
-                  <Artwork
-                    eager={index < 2}
-                    src={
-                      item.still_url ||
-                      `/api/v1/items/${idPath(item.id)}/poster`
-                    }
-                    title={item.title}
-                  />
-                  <span className="resume-play">
-                    <Play size={21} fill="currentColor" />
-                  </span>
-                </button>
-                <div className="episode-copy">
-                  <div className="episode-topline">
-                    <span className="eyebrow">
-                      {episodeCode(season?.season_number, item.episode_number)}
-                    </span>
-                    <span>{runtime(item.runtime_seconds)}</span>
-                  </div>
-                  <h3>
-                    {episodeCode(season?.season_number, item.episode_number)} ·{" "}
-                    {item.title}
-                  </h3>
-                  <p>{item.overview || "No episode synopsis available yet."}</p>
-                </div>
-                <button
-                  className="episode-play icon-button"
-                  onClick={() => play(item)}
-                  aria-label={`Watch ${item.title}`}
-                >
-                  <Play size={21} fill="currentColor" />
-                </button>
-              </article>
-            ))}
+                <p>
+                  {source?.Container?.toUpperCase() || "Source format"}{" "}
+                  {source?.MediaStreams.find(
+                    (s) => s.Type === "Video",
+                  )?.Codec?.toUpperCase()}
+                </p>
+                <p>
+                  {source?.MediaStreams.find((s) => s.Type === "Video")?.Width
+                    ? `${source.MediaStreams.find((s) => s.Type === "Video")?.Width} × ${source.MediaStreams.find((s) => s.Type === "Video")?.Height}`
+                    : "Details appear when probed"}
+                </p>
+              </div>
+              <div>
+                <span>
+                  <AudioLines size={15} /> AUDIO
+                </span>
+                {audio.length ? (
+                  audio.map((track) => (
+                    <p key={track.Index}>
+                      {track.Language || "Unknown language"} ·{" "}
+                      {track.Codec?.toUpperCase()}
+                      {track.Channels ? ` · ${track.Channels} ch` : ""}
+                      {track.IsDefault ? " · Default" : ""}
+                    </p>
+                  ))
+                ) : (
+                  <p>No audio metadata</p>
+                )}
+              </div>
+              <div>
+                <span>
+                  <Captions size={15} /> SUBTITLES
+                </span>
+                {subtitles.length ? (
+                  subtitles.map((track) => (
+                    <p key={track.Index}>
+                      {track.Language || "Unknown language"} ·{" "}
+                      {track.Codec?.toUpperCase()}
+                      {track.IsForced ? " · Forced" : ""}
+                      {!track.IsTextSubtitleStream ? " · Native player" : ""}
+                    </p>
+                  ))
+                ) : (
+                  <p>No subtitle tracks</p>
+                )}
+              </div>
+            </div>
           </div>
-        )}
-      </section>
-    </main>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
-return ShowPage;
+return MovieSheet;
 })();
