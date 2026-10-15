@@ -1,12 +1,11 @@
 import MovieSheet from "./components/MovieSheet";
-import * as inlinePlayerDependency0 from "react";
-import * as inlinePlayerDependency1 from "@radix-ui/react-slider";
-import * as inlinePlayerDependency2 from "@radix-ui/react-dropdown-menu";
-import * as inlinePlayerDependency3 from "lucide-react";
-import * as inlinePlayerDependency4 from "./store";
-import * as inlinePlayerDependency5 from "./api";
-import * as inlinePlayerDependency7 from "./player/engine";
-import * as inlinePlayerDependency8 from "./types";
+import { Player } from "./components/Player";
+import * as inlineSettingsDependency0 from "react";
+import * as inlineSettingsDependency1 from "@radix-ui/react-dialog";
+import * as inlineSettingsDependency2 from "@radix-ui/react-tabs";
+import * as inlineSettingsDependency3 from "lucide-react";
+import * as inlineSettingsDependency4 from "./components/useSpatialPresence";
+import * as inlineSettingsDependency5 from "./api";
 import ShowPage from "./components/ShowPage";
 import { useEffect, useState } from "react";
 import type { Title } from "./types";
@@ -39,649 +38,423 @@ export default function App() {
   </main>;
 }
 
-const Player = (() => {
-const useEffect = inlinePlayerDependency0.useEffect;
-const useRef = inlinePlayerDependency0.useRef;
-const useState = inlinePlayerDependency0.useState;
-const Slider = inlinePlayerDependency1;
-const Menu = inlinePlayerDependency2;
-const ArrowDownLeft = inlinePlayerDependency3.ArrowDownLeft;
-const ArrowUpRight = inlinePlayerDependency3.ArrowUpRight;
-const Captions = inlinePlayerDependency3.Captions;
-const Check = inlinePlayerDependency3.Check;
-const ChevronLeft = inlinePlayerDependency3.ChevronLeft;
-const LoaderCircle = inlinePlayerDependency3.LoaderCircle;
-const Maximize = inlinePlayerDependency3.Maximize;
-const Minimize2 = inlinePlayerDependency3.Minimize2;
-const MoreHorizontal = inlinePlayerDependency3.MoreHorizontal;
-const Pause = inlinePlayerDependency3.Pause;
-const PictureInPicture2 = inlinePlayerDependency3.PictureInPicture2;
-const Play = inlinePlayerDependency3.Play;
-const RotateCcw = inlinePlayerDependency3.RotateCcw;
-const RotateCw = inlinePlayerDependency3.RotateCw;
-const Volume2 = inlinePlayerDependency3.Volume2;
-const VolumeX = inlinePlayerDependency3.VolumeX;
-const X = inlinePlayerDependency3.X;
-const usePlayer = inlinePlayerDependency4.usePlayer;
-const playTitle = inlinePlayerDependency4.playTitle;
-const api = inlinePlayerDependency5.api;
-type Experience = import("./components/Immersion").Experience;
-const canBuffer = inlinePlayerDependency7.canBuffer;
-const flushProgress = inlinePlayerDependency7.flushProgress;
-const PlaybackEngine = inlinePlayerDependency7.PlaybackEngine;
-type PlaybackEngine = import("./player/engine").PlaybackEngine;
-const formatTime = inlinePlayerDependency8.formatTime;
-type StreamMode = import("./store").StreamMode;
+const Settings = (() => {
+const useEffect = inlineSettingsDependency0.useEffect;
+const useState = inlineSettingsDependency0.useState;
+const Dialog = inlineSettingsDependency1;
+const Tabs = inlineSettingsDependency2;
+const X = inlineSettingsDependency3.X;
+const SlidersHorizontal = inlineSettingsDependency3.SlidersHorizontal;
+const Database = inlineSettingsDependency3.Database;
+const Clapperboard = inlineSettingsDependency3.Clapperboard;
+const Activity = inlineSettingsDependency3.Activity;
+const Check = inlineSettingsDependency3.Check;
+const LoaderCircle = inlineSettingsDependency3.LoaderCircle;
+const useSpatialPresence = inlineSettingsDependency4.useSpatialPresence;
+const api = inlineSettingsDependency5.api;
+const message = inlineSettingsDependency5.message;
 
-
-const language = (value?: string) =>
-  ({
-    eng: "English",
-    en: "English",
-    deu: "Deutsch",
-    ger: "Deutsch",
-    de: "Deutsch",
-    fra: "Français",
-    fre: "Français",
-    spa: "Español",
-    jpn: "日本語",
-    und: "Unknown language",
-  })[value || ""] ||
-  value ||
-  "Unknown language";
-function Player() {
-  const state = usePlayer();
-  const [experience, setExperience] = useState<Experience | null>(null);
-  const [countdown, setCountdown] = useState(10);
-  const [dismissed, setDismissed] = useState(false);
+type Config = {
+  values: Record<string, string>;
+  tmdb_configured: boolean;
+  metadata_path: string;
+  library_paths: string[];
+};
+type Stats = {
+  version: string;
+  architecture: string;
+  rust_edition: string;
+  ffmpeg: string;
+  uptime_seconds: number;
+  db_bytes: number;
+  wal_bytes: number;
+  artwork_bytes: number;
+  media_count: number;
+  extracted_count: number;
+  metadata_pending: number;
+  scan: { running: boolean; indexed: number; phase: string; failed?: number };
+  active_streams: { title: string; profile: string }[];
+  logs: string[];
+};
+const bytes = (n = 0) =>
+  n < 1048576
+    ? `${(n / 1024).toFixed(1)} KB`
+    : `${(n / 1048576).toFixed(1)} MB`;
+function Settings({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const spatial = useSpatialPresence(open);
+  const [c, setC] = useState<Config | null>(null),
+    [stats, setStats] = useState<Stats | null>(null),
+    [key, setKey] = useState(""),
+    [status, setStatus] = useState(""),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
   useEffect(() => {
-    setExperience(null);
-    setCountdown(10);
-    setDismissed(false);
-    if (!state.item) return;
+    if (!open) return;
     const a = new AbortController();
-    api<Experience>(
-      `/api/v1/items/${encodeURIComponent(state.item.id)}/experience`,
-      { signal: a.signal },
-    )
-      .then(setExperience)
-      .catch(() => {});
-    return () => a.abort();
-  }, [state.item?.id]);
-  const nearingEnd =
-    state.item?.kind === "episode" &&
-    state.duration > 30 &&
-    state.position >= state.duration - 30;
-  useEffect(() => {
-    if (!nearingEnd || !state.playing || dismissed || !experience?.next_episode)
-      return;
-    const timer = setInterval(
-      () => setCountdown((n) => Math.max(0, n - 1)),
-      1000,
-    );
-    return () => clearInterval(timer);
-  }, [nearingEnd, state.playing, dismissed, experience?.next_episode]);
-  useEffect(() => {
-    if (countdown !== 0 || dismissed || !experience?.next_episode) return;
-    setDismissed(true);
-    window.dispatchEvent(new Event("player-save"));
-    void flushProgress()
-      .then(() =>
-        api("/api/v1/playback", {
-          method: "POST",
-          body: JSON.stringify({
-            item_id: state.item?.id,
-            profile_id: state.profileId,
-            position_ticks: Math.floor(state.position * 10000000),
-            stopped: true,
-            completed: true,
-          }),
-        }),
-      )
-      .then(() => {
-        const current = usePlayer.getState();
-        if (
-          current.item?.id === state.item?.id &&
-          current.profileId === state.profileId
-        )
-          return playTitle(experience.next_episode!, 0);
-      })
-      .catch(() =>
-        usePlayer.getState().patch({
-          error: "Next episode could not start. Choose it from the season.",
-        }),
-      );
-  }, [countdown, dismissed, experience]);
-
-  const {
-    item,
-    source,
-    expanded,
-    playing,
-    position,
-    duration,
-    volume,
-    muted,
-    loading,
-    error,
-    patch,
-  } = state;
-  const video = useRef<HTMLVideoElement>(null);
-  const engine = useRef<PlaybackEngine | null>(null);
-  const surface = useRef<HTMLElement>(null);
-  const [scrubbing, setScrubbing] = useState<number | null>(null);
-  const [pipAvailable, setPipAvailable] = useState(false);
-  useEffect(() => {
-    const current = usePlayer.getState();
-    if (!current.item || !current.source || !video.current) return;
-    const instance = new PlaybackEngine(
-      video.current,
-      current.item,
-      current.source,
-      current.profileId,
-      current.mode,
-      current.audioIndex,
-      current.position,
-    );
-    engine.current = instance;
-    const save = () => instance.save(true);
-    window.addEventListener("player-save", save);
+    api<Config>("/api/v1/settings", { signal: a.signal })
+      .then(setC)
+      .catch((e) => {
+        if (!a.signal.aborted) setError(message(e));
+      });
+    const refresh = () =>
+      api<Stats>("/api/v1/settings/stats", { signal: a.signal })
+        .then(setStats)
+        .catch((e) => {
+          if (!a.signal.aborted) setError(message(e));
+        });
+    void refresh();
+    const timer = setInterval(refresh, 3000);
     return () => {
-      window.removeEventListener("player-save", save);
-      instance.destroy();
-      engine.current = null;
+      a.abort();
+      clearInterval(timer);
     };
-    // Layout and browsing state deliberately do not participate in the source lifetime.
-  }, [state.nonce, state.mode, state.audioIndex, item?.id]);
-  useEffect(() => {
-    engine.current?.subtitle(state.subtitleIndex);
-  }, [state.nonce, state.subtitleIndex, state.mode, state.audioIndex]);
-  useEffect(() => {
-    if (video.current) {
-      video.current.volume = Number.isFinite(volume) ? volume : 0.8;
-      video.current.muted = muted;
+  }, [open]);
+  const update = (k: string, v: string) =>
+    setC((c) => (c ? { ...c, values: { ...c.values, [k]: v } } : c));
+  const action = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      await fn();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
     }
-  }, [volume, muted, state.nonce]);
-  useEffect(() => {
-    setPipAvailable(Boolean(document.pictureInPictureEnabled));
-  }, []);
-  useEffect(() => {
-    if (!expanded) return;
-    const before = document.activeElement as HTMLElement | null;
-    const shell = document.getElementById("browse-shell");
-    if (shell) shell.inert = true;
-    const oldOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    surface.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    return () => {
-      if (shell) shell.inert = false;
-      document.body.style.overflow = oldOverflow;
-      if (before?.isConnected) before.focus({ preventScroll: true });
-    };
-  }, [expanded]);
-  const togglePlay = () => {
-    if (video.current?.paused)
-      video.current
-        .play()
-        .catch(() => patch({ error: "Press play to start playback." }));
-    else video.current?.pause();
   };
-  useEffect(() => {
-    if (!item) return;
-    const keydown = (event: KeyboardEvent) => {
-      if (
-        (event.target as HTMLElement).closest(
-          'input,select,textarea,[role="slider"],[role="menu"],[role="dialog"]',
-        ) ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.altKey
-      )
-        return;
-      if (event.key === "Escape" && expanded && !document.fullscreenElement) {
-        event.preventDefault();
-        patch({ expanded: false });
-        return;
-      }
-      if (!expanded) return;
-      if (event.key === " " || event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        if (video.current?.paused) void video.current.play();
-        else video.current?.pause();
-      }
-      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        event.preventDefault();
-        engine.current?.seek(
-          (video.current?.currentTime || 0) +
-            (event.key === "ArrowLeft" ? -10 : 10),
-        );
-      }
-      if (event.key.toLowerCase() === "m")
-        patch({ muted: !usePlayer.getState().muted });
-    };
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  }, [item, expanded, patch]);
-  const dock = async () => {
-    if (document.fullscreenElement) await document.exitFullscreen();
-    engine.current?.save();
-    patch({ expanded: false });
-    await flushProgress();
-    window.dispatchEvent(new Event("history-changed"));
-  };
-  const close = async () => {
-    if (document.pictureInPictureElement)
-      await document.exitPictureInPicture().catch(() => {});
-    if (document.fullscreenElement) await document.exitFullscreen();
-    engine.current?.save(true);
-    usePlayer.getState().close();
-    await flushProgress();
-    window.dispatchEvent(new Event("history-changed"));
-  };
-  const settings = (mode: StreamMode) => {
-    if (!item) return;
-    if (
-      mode !== "direct" &&
-      !canBuffer(
-        mode,
-        item,
-        source?.MediaStreams.filter((s) => s.Type === "Audio")[
-          state.audioIndex ?? 0
-        ]?.Codec,
-      )
-    )
-      return;
-    patch({
-      mode,
-      error: "",
-      start: position,
-      ...(mode === "direct" ? { audioIndex: null } : {}),
+  const save = async (enrich = false) => {
+    if (!c) return;
+    const values = { ...c.values, ...(key ? { tmdb_api_key: key } : {}) };
+    const saved = await api<Config>("/api/v1/settings", {
+      method: "POST",
+      body: JSON.stringify(values),
     });
+    setC(saved);
+    setKey("");
+    if (enrich) await api("/api/v1/settings/rescan", { method: "POST" });
+    setStatus(
+      enrich
+        ? "Saved. Library enrichment queued."
+        : "Your preferences are saved.",
+    );
   };
   return (
-    <section
-      ref={surface}
-      className={`player ${item ? "is-active" : ""} ${expanded ? "is-expanded" : "is-docked"}`}
-      aria-label={expanded ? "Cinema player" : "Mini player"}
-      aria-hidden={!item}
+    <Dialog.Root
+      open={spatial.present}
+      onOpenChange={(v) => {
+        if (!v) onClose();
+      }}
     >
-      <div className="video-stage">
-        <video
-          ref={video}
-          id="persistent-video"
-          playsInline
-          preload="metadata"
-          onClick={togglePlay}
-          aria-label={item ? `Playing ${item.title}` : "Video player"}
-        />
-        {expanded &&
-          item?.kind === "episode" &&
-          position < 180 &&
-          duration - position > 30 &&
-          (() => {
-            const intro = experience?.chapters?.find((c) =>
-              /intro|opening/i.test(c.tags?.title || ""),
-            );
-            const start = Number(intro?.start_time || 0);
-            const end = Number(intro?.end_time || 0);
-            if (intro && (position < start || position >= end)) return null;
-            return (
-              <button
-                className="skip-intro glass-button"
-                onClick={() =>
-                  engine.current?.seek(
-                    intro ? end : Math.min(duration, position + 85),
-                  )
-                }
-              >
-                {intro ? "Skip intro" : "+85s Skip Intro"}
-              </button>
-            );
-          })()}
-        {expanded && nearingEnd && experience?.next_episode && !dismissed && (
-          <div className="episode-prompt glass" role="status">
-            <span className="eyebrow">KEEP THE STORY GOING</span>
-            <h3>Next Episode in {countdown}s…</h3>
-            <p>{experience.next_episode.title}</p>
-            <button className="primary-button" onClick={() => setCountdown(0)}>
-              Play next episode
-            </button>
-            <button className="cancel-next" onClick={() => setDismissed(true)}>
-              Stay with this episode
-            </button>
-          </div>
-        )}
-        {expanded && loading && (
-          <div className="video-loading" role="status">
-            <LoaderCircle className="spin" size={28} />
-            <span>Preparing your cinema…</span>
-          </div>
-        )}
-      </div>
-      {item && (
-        <>
-          {expanded && (
-            <header className="cinema-header">
-              <button
-                className="glass-button"
-                onClick={() => void dock()}
-                aria-label="Browse while playing"
-              >
-                <ChevronLeft size={18} /> Browse library
-              </button>
-              <span className="cinema-wordmark">
-                KODIAC <span>CINEMA</span>
-              </span>
-              <button
-                className="icon-button glass"
-                onClick={() => void dock()}
-                aria-label="Dock player"
-              >
-                <Minimize2 size={20} />
-              </button>
-            </header>
-          )}
-          <div className="player-panel glass">
-            <div className="now-playing">
-              <span className="eyebrow">
-                {expanded ? "NOW PLAYING" : "CONTINUE EXPLORING"}
-              </span>
-              <strong>{item.title}</strong>
-              <span>
-                {item.series_name ||
-                  item.show_title ||
-                  item.year ||
-                  "Your private cinema"}
-              </span>
+      <Dialog.Portal>
+        <Dialog.Overlay ref={spatial.overlay} className="dialog-overlay" />
+        <Dialog.Content ref={spatial.panel} className="settings-panel glass">
+          <header className="settings-header">
+            <div>
+              <span className="eyebrow">MAKE YOURSELF AT HOME</span>
+              <Dialog.Title>Your cinema, your way.</Dialog.Title>
+              <Dialog.Description>
+                Fine-tune your library and every moment of playback.
+              </Dialog.Description>
             </div>
-            <div className="transport">
-              <button
-                className="icon-button skip"
-                onClick={() => engine.current?.seek(position - 10)}
-                aria-label="Back 10 seconds"
-              >
-                <RotateCcw size={19} />
-                <span>10</span>
-              </button>
-              <button
-                className="play-toggle"
-                onClick={togglePlay}
-                aria-label={playing ? "Pause" : "Play"}
-              >
-                {playing ? (
-                  <Pause size={21} fill="currentColor" />
-                ) : (
-                  <Play size={21} fill="currentColor" />
-                )}
-              </button>
-              <button
-                className="icon-button skip"
-                onClick={() => engine.current?.seek(position + 10)}
-                aria-label="Forward 10 seconds"
-              >
-                <RotateCw size={19} />
-                <span>10</span>
-              </button>
-            </div>
-            <div className="scrubber">
-              <span>{formatTime(scrubbing ?? position)}</span>
-              <Slider.Root
-                className="slider"
-                aria-label="Playback position"
-                min={0}
-                max={Math.max(duration, 1)}
-                step={0.1}
-                value={[scrubbing ?? position]}
-                onValueChange={([value]) => setScrubbing(value)}
-                onValueCommit={([value]) => {
-                  engine.current?.seek(value);
-                  setScrubbing(null);
-                }}
-                disabled={!duration}
-              >
-                <Slider.Track className="slider-track">
-                  <Slider.Range className="slider-range" />
-                </Slider.Track>
-                <Slider.Thumb
-                  className="slider-thumb"
-                  aria-label="Playback position"
-                  aria-valuetext={`${formatTime(scrubbing ?? position)} of ${formatTime(duration)}`}
-                />
-              </Slider.Root>
-              <span>{formatTime(duration)}</span>
-            </div>
-            <div className="volume-control">
-              <button
-                className="icon-button"
-                onClick={() => patch({ muted: !muted })}
-                aria-label={muted ? "Unmute" : "Mute"}
-              >
-                {muted || volume === 0 ? (
-                  <VolumeX size={19} />
-                ) : (
-                  <Volume2 size={19} />
-                )}
-              </button>
-              <Slider.Root
-                className="slider volume-slider"
-                aria-label="Volume"
-                min={0}
-                max={1}
-                step={0.01}
-                value={[muted ? 0 : volume]}
-                onValueChange={([value]) =>
-                  patch({ volume: value, muted: false })
-                }
-              >
-                <Slider.Track className="slider-track">
-                  <Slider.Range className="slider-range" />
-                </Slider.Track>
-                <Slider.Thumb
-                  className="slider-thumb"
-                  aria-label="Volume"
-                  aria-valuetext={`${Math.round((muted ? 0 : volume) * 100)} percent`}
-                />
-              </Slider.Root>
-            </div>
-            <Menu.Root>
-              <Menu.Trigger asChild>
-                <button className="icon-button" aria-label="Playback settings">
-                  <MoreHorizontal size={23} />
-                </button>
-              </Menu.Trigger>
-              <Menu.Portal>
-                <Menu.Content
-                  className="menu glass playback-menu"
-                  side="top"
-                  sideOffset={15}
-                  align="end"
+            <Dialog.Close className="icon-button" aria-label="Close settings">
+              <X />
+            </Dialog.Close>
+          </header>
+          <Tabs.Root defaultValue="general" className="settings-layout">
+            <Tabs.List className="settings-tabs" aria-label="Settings sections">
+              {(
+                [
+                  ["general", "General & Metadata", SlidersHorizontal],
+                  ["library", "Library & Storage", Database],
+                  ["playback", "Streaming & Playback", Clapperboard],
+                  ["system", "System & Diagnostics", Activity],
+                ] as const
+              ).map(([id, label, Icon]) => (
+                <Tabs.Trigger key={String(id)} value={String(id)}>
+                  <Icon size={17} />
+                  <span>{String(label)}</span>
+                </Tabs.Trigger>
+              ))}
+            </Tabs.List>
+            <div className="settings-body">
+              <Tabs.Content value="general">
+                <span className="eyebrow">A LIBRARY WITH A STORY</span>
+                <h2>Bring every title to life.</h2>
+                <p>
+                  Rich artwork, the people behind the story, and the details
+                  that make choosing effortless.
+                </p>
+                <label>
+                  TMDB API key
+                  <span className="field-hint">
+                    {c?.tmdb_configured
+                      ? "A key is securely stored. Enter a replacement to update it."
+                      : "Connect your TMDB account for posters, ratings and cast."}
+                  </span>
+                  <div className="input-action">
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      value={key}
+                      onChange={(e) => setKey(e.target.value)}
+                      placeholder={
+                        c?.tmdb_configured
+                          ? "••••••••"
+                          : "Enter API key or read access token"
+                      }
+                    />
+                    <button
+                      className="secondary-button"
+                      disabled={busy}
+                      onClick={() =>
+                        void action(async () => {
+                          const r = await api<{ valid: boolean }>(
+                            "/api/v1/settings/verify",
+                            {
+                              method: "POST",
+                              body: JSON.stringify({ tmdb_api_key: key }),
+                            },
+                          );
+                          if (!r.valid)
+                            throw new Error(
+                              "The key could not be verified. Check the key and server connection.",
+                            );
+                          setStatus("TMDB key verified.");
+                        })
+                      }
+                    >
+                      Verify key
+                    </button>
+                  </div>
+                </label>
+                <label className="toggle-row">
+                  <div>
+                    <strong>Always find the scene</strong>
+                    <span className="field-hint">
+                      Extract a cinematic frame with FFmpeg when artwork is
+                      missing.
+                    </span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={c?.values.thumbnail_fallback !== "false"}
+                    onChange={(e) =>
+                      update("thumbnail_fallback", String(e.target.checked))
+                    }
+                  />
+                </label>
+                <div className="settings-note">
+                  Artwork cache <code>{c?.metadata_path}</code>
+                </div>
+                <button
+                  className="primary-button"
+                  disabled={busy || !c}
+                  onClick={() => void action(() => save(true))}
                 >
-                  <Menu.Label className="menu-label">PLAYBACK</Menu.Label>
-                  <Menu.RadioGroup
-                    value={state.mode}
-                    onValueChange={(value) => settings(value as StreamMode)}
+                  Save & Enrich Library Now
+                </button>
+              </Tabs.Content>
+              <Tabs.Content value="library">
+                <span className="eyebrow">ALL YOUR STORIES, TOGETHER</span>
+                <h2>Room for your collection.</h2>
+                <p>Your monitored folders are mounted by the server.</p>
+                <div className="path-list">
+                  {c?.library_paths.map((p) => (
+                    <div key={p}>
+                      <Database size={16} />
+                      <code>{p}</code>
+                      <span>MONITORED</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="storage-grid">
+                  <div>
+                    <strong>{bytes(stats?.db_bytes)}</strong>
+                    <span>SQLite database</span>
+                  </div>
+                  <div>
+                    <strong>{bytes(stats?.artwork_bytes)}</strong>
+                    <span>Artwork cache</span>
+                  </div>
+                  <div>
+                    <strong>{stats?.extracted_count ?? "—"}</strong>
+                    <span>Extracted scenes</span>
+                  </div>
+                </div>
+                <button
+                  className="primary-button"
+                  disabled={busy || stats?.scan.running}
+                  onClick={() =>
+                    void action(async () => {
+                      await api("/api/v1/settings/rescan", { method: "POST" });
+                      setStatus("Library scan started.");
+                    })
+                  }
+                >
+                  {stats?.scan.running ? (
+                    <LoaderCircle className="spin" size={17} />
+                  ) : (
+                    <Database size={17} />
+                  )}
+                  Scan Libraries
+                </button>
+                <div className="scan-status" role="status">
+                  <strong>{stats?.scan.phase || "Ready to scan"}</strong>
+                  <p>
+                    {stats?.scan.indexed ?? 0} indexed ·{" "}
+                    {stats?.scan.failed ?? 0} failed ·{" "}
+                    {stats?.metadata_pending ?? 0} metadata jobs pending
+                  </p>
+                  {stats?.scan.running && (
+                    <progress aria-label="Scanning library" />
+                  )}
+                </div>
+              </Tabs.Content>
+              <Tabs.Content value="playback">
+                <span className="eyebrow">PRESS PLAY. SETTLE IN.</span>
+                <h2>A seamless first frame.</h2>
+                <p>Defaults apply to the next playback session.</p>
+                <label>
+                  Hardware acceleration
+                  <select
+                    value={c?.values.hw_accel || "auto"}
+                    onChange={(e) => update("hw_accel", e.target.value)}
                   >
-                    {(["direct", "remux", "transcode"] as const).map((mode) => (
-                      <Menu.RadioItem
-                        className="menu-item"
-                        key={mode}
-                        value={mode}
-                        disabled={
-                          mode !== "direct" &&
-                          !canBuffer(
-                            mode,
-                            item,
-                            source?.MediaStreams.filter(
-                              (s) => s.Type === "Audio",
-                            )[state.audioIndex ?? 0]?.Codec,
-                          )
-                        }
-                      >
-                        {mode === "direct"
-                          ? "Direct play"
-                          : mode === "remux"
-                            ? "Remux · Original quality"
-                            : "Transcode · H.264"}
-                        <Menu.ItemIndicator>
-                          <Check size={15} />
-                        </Menu.ItemIndicator>
-                      </Menu.RadioItem>
+                    <option value="auto">Auto</option>
+                    <option value="software">Software</option>
+                    <option value="vaapi">VAAPI</option>
+                    <option value="videotoolbox">VideoToolbox</option>
+                  </select>
+                </label>
+                <label>
+                  Software encoding preset
+                  <select
+                    value={c?.values.transcode_preset || "ultrafast"}
+                    onChange={(e) => update("transcode_preset", e.target.value)}
+                  >
+                    {[
+                      "ultrafast",
+                      "superfast",
+                      "veryfast",
+                      "fast",
+                      "medium",
+                    ].map((p) => (
+                      <option key={p}>{p}</option>
                     ))}
-                  </Menu.RadioGroup>
-                  <Menu.Separator className="menu-separator" />
-                  <Menu.Label className="menu-label">AUDIO</Menu.Label>
-                  <Menu.RadioGroup
-                    value={String(state.audioIndex ?? -1)}
-                    onValueChange={(value) => {
-                      const index = Number(value);
-                      if (index < 0) {
-                        patch({ audioIndex: null, mode: "direct", error: "" });
-                        return;
-                      }
-                      const audio = source?.MediaStreams.filter(
-                        (s) => s.Type === "Audio",
-                      )[index];
-                      if (!audio) return;
-                      const mode = canBuffer("remux", item, audio.Codec)
-                        ? "remux"
-                        : "transcode";
-                      if (!canBuffer(mode, item, audio.Codec)) {
-                        patch({
-                          error:
-                            "Audio switching requires MediaSource support in this browser.",
-                        });
-                        return;
-                      }
-                      patch({ audioIndex: index, mode, error: "" });
-                    }}
-                  >
-                    <Menu.RadioItem className="menu-item" value="-1">
-                      Default audio
-                      <Menu.ItemIndicator>
-                        <Check size={15} />
-                      </Menu.ItemIndicator>
-                    </Menu.RadioItem>
-                    {source?.MediaStreams.filter((s) => s.Type === "Audio").map(
-                      (track, index) => (
-                        <Menu.RadioItem
-                          className="menu-item"
-                          key={track.Index}
-                          value={String(index)}
-                        >
-                          {language(track.Language)} ·{" "}
-                          {track.Codec?.toUpperCase()}{" "}
-                          {track.Channels ? `· ${track.Channels} ch` : ""}
-                          <Menu.ItemIndicator>
-                            <Check size={15} />
-                          </Menu.ItemIndicator>
-                        </Menu.RadioItem>
-                      ),
-                    )}
-                  </Menu.RadioGroup>
-                  <Menu.Separator className="menu-separator" />
-                  <Menu.Label className="menu-label">
-                    <Captions size={14} /> SUBTITLES
-                  </Menu.Label>
-                  <Menu.RadioGroup
-                    value={String(state.subtitleIndex ?? -1)}
-                    onValueChange={(value) =>
-                      patch({
-                        subtitleIndex:
-                          Number(value) === -1 ? null : Number(value),
-                      })
+                  </select>
+                </label>
+                <label>
+                  Preferred audio language
+                  <select
+                    value={c?.values.audio_language_preference || "eng"}
+                    onChange={(e) =>
+                      update("audio_language_preference", e.target.value)
                     }
                   >
-                    <Menu.RadioItem className="menu-item" value="-1">
-                      Off
-                      <Menu.ItemIndicator>
-                        <Check size={15} />
-                      </Menu.ItemIndicator>
-                    </Menu.RadioItem>
-                    {source?.MediaStreams.filter(
-                      (s) => s.Type === "Subtitle" && s.IsTextSubtitleStream,
-                    ).map((track) => (
-                      <Menu.RadioItem
-                        className="menu-item"
-                        key={track.Index}
-                        value={String(track.Index)}
-                      >
-                        {language(track.Language)}
-                        {track.IsForced ? " · Forced" : ""}
-                        <Menu.ItemIndicator>
-                          <Check size={15} />
-                        </Menu.ItemIndicator>
-                      </Menu.RadioItem>
+                    {[
+                      ["deu", "German"],
+                      ["eng", "English"],
+                      ["fra", "French"],
+                      ["spa", "Spanish"],
+                      ["jpn", "Japanese"],
+                      ["ita", "Italian"],
+                    ].map(([id, label]) => (
+                      <option value={id} key={id}>
+                        {label}
+                      </option>
                     ))}
-                  </Menu.RadioGroup>
-                </Menu.Content>
-              </Menu.Portal>
-            </Menu.Root>
-            {expanded && pipAvailable && (
-              <button
-                className="icon-button pip-button"
-                aria-label="Picture in picture"
-                onClick={() => {
-                  const v = video.current;
-                  if (v)
-                    void (
-                      document.pictureInPictureElement
-                        ? document.exitPictureInPicture()
-                        : v.requestPictureInPicture()
-                    ).catch(() =>
-                      patch({
-                        error:
-                          "Picture in picture is unavailable for this video.",
-                      }),
-                    );
-                }}
-              >
-                <PictureInPicture2 size={20} />
-              </button>
-            )}
-            <button
-              className="icon-button expand-button"
-              aria-label={expanded ? "Enter fullscreen" : "Expand player"}
-              onClick={() =>
-                expanded
-                  ? void surface.current
-                      ?.requestFullscreen()
-                      .catch(() =>
-                        patch({ error: "Fullscreen is unavailable." }),
-                      )
-                  : patch({ expanded: true })
-              }
-            >
-              {expanded ? <Maximize size={19} /> : <ArrowUpRight size={21} />}
-            </button>
-            <button
-              className="icon-button close-player"
-              aria-label="Close player"
-              onClick={() => void close()}
-            >
-              <X size={19} />
-            </button>
-            {expanded && (
-              <button className="dock-label" onClick={() => void dock()}>
-                <ArrowDownLeft size={14} /> Keep watching while you browse
-              </button>
-            )}
-          </div>
-          {error && (
-            <div className="player-error" role="alert">
-              {error}
-              <button
-                aria-label="Dismiss playback message"
-                onClick={() => patch({ error: "" })}
-              >
-                <X size={15} />
-              </button>
+                  </select>
+                </label>
+                <label>
+                  Subtitles
+                  <select
+                    value={c?.values.subtitle_mode || "off"}
+                    onChange={(e) => update("subtitle_mode", e.target.value)}
+                  >
+                    <option value="off">Off</option>
+                    <option value="forced">Forced only</option>
+                    <option value="always">Always on</option>
+                  </select>
+                </label>
+                <button
+                  className="primary-button"
+                  disabled={busy || !c}
+                  onClick={() => void action(() => save())}
+                >
+                  Save playback preferences
+                </button>
+              </Tabs.Content>
+              <Tabs.Content value="system">
+                <span className="eyebrow">BEHIND THE SCREEN</span>
+                <h2>Everything in harmony.</h2>
+                <div className="system-grid">
+                  {[
+                    ["Release", `v${stats?.version || "1.1.0"}`],
+                    ["Rust edition", stats?.rust_edition],
+                    ["Architecture", stats?.architecture],
+                    [
+                      "Uptime",
+                      `${Math.floor((stats?.uptime_seconds || 0) / 60)} minutes`,
+                    ],
+                    ["Media files", stats?.media_count?.toLocaleString()],
+                    ["SQLite WAL", bytes(stats?.wal_bytes)],
+                  ].map(([k, v]) => (
+                    <div key={k}>
+                      <span>{k}</span>
+                      <strong>{v || "—"}</strong>
+                    </div>
+                  ))}
+                </div>
+                <p className="ffmpeg-version">{stats?.ffmpeg}</p>
+                <h3>Active streaming sessions</h3>
+                {stats?.active_streams.length ? (
+                  stats.active_streams.map((s, i) => (
+                    <p key={i}>
+                      {s.title} · {s.profile}
+                    </p>
+                  ))
+                ) : (
+                  <p>No streams playing right now.</p>
+                )}
+                <h3>Recent server events</h3>
+                <pre className="server-logs">
+                  {stats?.logs.join("\n") || "No recent events."}
+                </pre>
+              </Tabs.Content>
             </div>
-          )}
-        </>
-      )}
-    </section>
+          </Tabs.Root>
+          <footer className="settings-footer" aria-live="polite">
+            {busy ? (
+              <>
+                <LoaderCircle size={15} className="spin" />
+                Working…
+              </>
+            ) : error ? (
+              <span role="alert" className="inline-error">
+                {error}
+              </span>
+            ) : status ? (
+              <>
+                <Check size={15} />
+                {status}
+              </>
+            ) : (
+              <span>KODIAC · CINEMATIC LUXURY · v1.1.0</span>
+            )}
+          </footer>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
-return Player;
+return Settings;
 })();
