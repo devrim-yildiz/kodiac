@@ -1,0 +1,27 @@
+services:
+  medienserver:
+    image: medienserver:latest
+    build: .
+    container_name: medienserver
+    restart: unless-stopped
+    ports:
+      - "8097:8096"
+    environment:
+      HW_ACCEL: software
+      METADATA_PATH: /data/metadata
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    secrets:
+      - admin_password
+    volumes:
+      - ./data:/data
+      - ${MEDIENSERVER_MEDIA_PATH:?Set MEDIENSERVER_MEDIA_PATH to an existing media directory}:/media:ro
+    command:
+      - --media-path
+      - /media
+      - --db-path
+      - /data/media.db
+      - --bind
+      - 0.0.0.0
+secrets:
+  admin_password:
+    file: ./admin-password.secret
