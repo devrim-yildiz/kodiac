@@ -960,3 +960,169 @@ body {
   filter: blur(1px);
 }
 
+/* Apple Fluid Design · Codex · 2026-10-21 */
+:root {
+  --text-primary: rgba(255, 255, 255, 0.95);
+  --text-secondary: rgba(255, 255, 255, 0.65);
+  --text-tertiary: rgba(255, 255, 255, 0.45);
+}
+.navigation,
+.navigation.is-scrolled,
+.player-panel.glass,
+.settings-panel.glass {
+  background: rgba(18, 20, 24, 0.72);
+  backdrop-filter: blur(24px) saturate(190%);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(255, 255, 255, 0.22);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.4);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+.navigation::after {
+  content: "";
+  position: absolute;
+  inset: 100% 12px auto;
+  height: 20px;
+  background: linear-gradient(rgba(3, 5, 8, 0.18), transparent);
+  pointer-events: none;
+}
+.hero .hero-content h1,
+.section-heading h2,
+.settings-header h2,
+.settings-body h2,
+.sheet-body h2,
+.login-card h1 {
+  letter-spacing: -0.025em;
+  line-height: 1.04;
+  font-optical-sizing: auto;
+  color: var(--text-primary);
+}
+.hero-overview,
+.title-card p,
+.resume-card p,
+.settings-header p,
+.settings-body p,
+.sheet-synopsis,
+.metadata {
+  color: var(--text-secondary);
+}
+:is(
+  .eyebrow,
+  .quality-badge,
+  .rating-badge,
+  .poster-type,
+  .remaining,
+  .metadata,
+  .field-hint,
+  .settings-footer
+) {
+  letter-spacing: 0.02em;
+}
+.section-heading .eyebrow,
+.field-hint,
+.settings-footer,
+.heading-count {
+  color: var(--text-tertiary);
+}
+.continue-shelf,
+.cinematic-shelf {
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  /* Leave native platform elasticity and momentum intact. */
+  overscroll-behavior-x: auto;
+}
+.continue-shelf {
+  padding-block: 20px 30px;
+  margin-block: -20px -22px;
+  padding-inline: 12px;
+  margin-inline: -12px;
+}
+.resume-card {
+  transition: transform 350ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.poster-wrap,
+.resume-image {
+  transition: box-shadow 350ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@media (hover: hover) and (pointer: fine) {
+  .resume-card:hover {
+    transform: translateY(-6px) scale(1.05);
+  }
+}
+.title-card:focus-visible,
+.resume-card:focus-visible {
+  transform: translateY(-6px) scale(1.05);
+}
+:is(.title-card:hover, .title-card:focus-visible) .poster-wrap,
+:is(.resume-card:hover, .resume-card:focus-visible) .resume-image {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.15),
+    0 24px 52px rgba(0, 0, 0, 0.55),
+    0 8px 20px rgba(0, 0, 0, 0.25);
+}
+.title-card:hover .poster-wrap::after,
+.title-card:focus-visible .poster-wrap::after {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+:is(.title-card, .resume-card):active {
+  transform: scale(0.97);
+  transition: transform 80ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.settings-panel,
+.movie-sheet {
+  transform-origin: calc(var(--sheet-origin-x, 50vw) - (100vw - 100%) / 2)
+    calc(var(--sheet-origin-y, 50vh) - (100vh - 100%) / 2);
+  animation: none;
+}
+.dialog-overlay {
+  animation: none;
+}
+.settings-header,
+.settings-tabs,
+.settings-footer {
+  border-color: transparent;
+}
+@media (hover: none) {
+  .title-card:hover {
+    transform: none;
+  }
+  .title-card:active {
+    transform: scale(0.97);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(button, a, .title-card, .resume-card):is(:hover, :active, :focus-visible),
+  .title-card::before {
+    transform: none !important;
+  }
+  :is(button, a):active {
+    opacity: 0.75;
+  }
+  :is(button, a, .poster-play, .resume-play) {
+    transition: opacity 150ms ease !important;
+  }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .glass,
+  .navigation,
+  .navigation.is-scrolled,
+  .player-panel.glass,
+  .settings-panel.glass {
+    background: #121418;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+@media (prefers-contrast: more) {
+  :root {
+    --text-secondary: #ededed;
+    --text-tertiary: #d4d4d4;
+  }
+  .glass,
+  .navigation,
+  .player-panel.glass,
+  .settings-panel.glass {
+    border: 1px solid #b6bbc4;
+  }
+}
