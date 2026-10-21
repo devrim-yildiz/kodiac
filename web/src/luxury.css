@@ -948,16 +948,21 @@ body {
     height: 28px;
   }
 }
-.title-card:hover .poster-wrap {
-  transform: scale(1.04);
-  transition: transform 180ms linear;
-}
+/* Keep scene artwork pristine: frost only the play indicator. */
 .poster-play {
-  backdrop-filter: blur(12px);
-  background: #0005;
+  backdrop-filter: none;
+  background: linear-gradient(0deg, #0005, transparent 70%);
+  border: 0;
+  box-shadow: none;
 }
-.title-card:hover .artwork {
-  filter: blur(1px);
+.poster-play svg {
+  background: #ffffff20;
+  backdrop-filter: blur(18px);
+  box-shadow: 0 0 30px #fff3;
+}
+.title-card:hover .poster-wrap,
+.title-card:focus-visible .poster-wrap {
+  transform: none;
 }
 
 /* Apple Fluid Design · Codex · 2026-10-21 */
