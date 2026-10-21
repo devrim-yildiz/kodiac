@@ -1,6 +1,9 @@
+//! Durable background jobs for FFmpeg-generated fallback artwork when local/remote art is absent.
 
+//! Single, bounded FFmpeg worker. Retries unavailable/short/corrupt sources without blocking HTTP.
 use crate::AppState;
 use std::{process::Stdio, time::Duration};
+/// Process one due fallback-artwork job; return whether work was attempted.
 pub async fn run_once(s: &AppState) -> anyhow::Result<bool> {
     if crate::api::v1::settings::values(s)
         .await?
@@ -100,6 +103,7 @@ async fn extract(
         .to_string_lossy()
         .into_owned())
 }
+/// Poll persistent fallback-artwork jobs until server cancellation.
 pub async fn run(s: AppState) {
     loop {
         let result = tokio::select! {_=s.shutdown.cancelled()=>break,r=run_once(&s)=>r};

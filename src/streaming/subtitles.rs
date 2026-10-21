@@ -1,3 +1,4 @@
+//! Bounded conversion of supported text subtitles to WebVTT; bitmap burn-in is not implemented.
 
 use crate::{
     AppState, db,
@@ -12,12 +13,14 @@ use serde_json::Value;
 use std::{process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command};
 
+/// Return whether the codec supports conversion to WebVTT.
 pub fn is_text(codec: &str) -> bool {
     matches!(
         codec,
         "subrip" | "srt" | "ass" | "ssa" | "webvtt" | "mov_text" | "text"
     )
 }
+/// Serve a native subtitle track after validating the media and stream index.
 pub async fn serve(
     State(state): State<AppState>,
     Path((id, index)): Path<(String, String)>,
@@ -29,6 +32,7 @@ pub async fn serve(
         .map_err(|_| AppError::NotFound)?;
     extract(&state, &id, index).await
 }
+/// Adapt Jellyfin subtitle paths to the same bounded WebVTT conversion path.
 pub async fn jellyfin(
     State(state): State<AppState>,
     Path((id, source, index)): Path<(String, String, u64)>,

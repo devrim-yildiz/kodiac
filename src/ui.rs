@@ -1,3 +1,4 @@
+//! Embedded SPA asset delivery with explicit content types, cache policy and CSP.
 
 use axum::{
     body::Body,
@@ -8,6 +9,7 @@ use rust_embed::RustEmbed;
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]
 struct Assets;
+/// Serve an embedded asset for GET/HEAD with cache policy and content security headers.
 pub async fn serve(method: Method, uri: Uri) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return Response::builder()

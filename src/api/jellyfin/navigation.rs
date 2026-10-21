@@ -1,3 +1,4 @@
+//! Stable virtual Movies/Series views, show/season IDs, filtering, ordering and pagination.
 
 use crate::{
     AppState,
@@ -9,11 +10,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
+/// Stable identifier of the virtual Movies library view.
 pub const MOVIES: &str = "00000000000000000000000000000001";
+/// Stable identifier of the virtual Series library view.
 pub const SERIES: &str = "00000000000000000000000000000002";
+/// Derive a stable virtual series identifier from its name.
 pub fn series_id(name: &str) -> String {
     format!("{:x}", Sha256::digest(format!("series:{name}").as_bytes()))[..32].into()
 }
+/// Derive a stable virtual season identifier from series name and season number.
 pub fn season_id(name: &str, season: i64) -> String {
     format!(
         "{:x}",
@@ -21,23 +26,36 @@ pub fn season_id(name: &str, season: i64) -> String {
     )[..32]
         .into()
 }
+/// Return the Movies and Series virtual root views.
 pub fn views(state: &AppState) -> Value {
     let rows:Vec<_>=[(MOVIES,"Movies","movies"),(SERIES,"Series","tvshows")].into_iter().map(|(id,name,kind)|json!({"Id":id,"Name":name,"ServerId":*state.server_id,"Type":"CollectionFolder","IsFolder":true,"CollectionType":kind,"ImageTags":{},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})).collect();
     json!({"Items":rows,"TotalRecordCount":2,"StartIndex":0})
 }
+/// Jellyfin navigation filters using PascalCase query parameter names.
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct ItemQuery {
+    /// Zero-based first record offset.
     pub start_index: Option<i64>,
+    /// Maximum records requested, clamped by the handler.
     pub limit: Option<i64>,
+    /// Optional Jellyfin title search text.
     pub search_term: Option<String>,
+    /// Comma-separated Jellyfin item types.
     pub include_item_types: Option<String>,
+    /// Folder, show or season to browse.
     pub parent_id: Option<String>,
+    /// Requested Jellyfin sort fields.
     pub sort_by: Option<String>,
+    /// Ascending or descending navigation order.
     pub sort_order: Option<String>,
+    /// Whether to include nested items where supported.
     pub recursive: Option<bool>,
+    /// Optional season identifier.
     pub season_id: Option<String>,
+    /// Season number; zero denotes specials.
     pub season: Option<i64>,
+    /// Optional account identifier; access is checked against the session.
     pub user_id: Option<String>,
 }
 async fn all(state: &AppState) -> Result<Vec<MediaItem>> {
@@ -47,6 +65,7 @@ async fn all(state: &AppState) -> Result<Vec<MediaItem>> {
     .fetch_all(&state.pool)
     .await?)
 }
+/// Resolve a virtual folder to an available media item for artwork.
 pub async fn representative(state: &AppState, id: &str) -> Result<MediaItem> {
     all(state)
         .await?
@@ -63,6 +82,7 @@ fn folder(item: &MediaItem, state: &AppState, season: bool) -> Value {
     let n = item.season.unwrap_or(0);
     json!({"Id":if season {season_id(name,n)} else {series_id(name)},"Name":if season {format!("Season {n}")} else {name.into()},"ServerId":*state.server_id,"Type":if season {"Season"} else {"Series"},"IsFolder":true,"Overview":if season {""} else {&item.plot},"IndexNumber":if season {Some(n)} else {None},"ParentId":if season {series_id(name)} else {SERIES.into()},"SeriesId":series_id(name),"SeriesName":name,"ImageTags":if item.poster_path.is_some(){json!({"Primary":item.id})}else{json!({})},"BackdropImageTags":if item.backdrop_path.is_some(){json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})
 }
+/// Describe a virtual root, series or season folder.
 pub async fn get_folder(state: &AppState, id: &str) -> Result<Value> {
     if id == MOVIES || id == SERIES {
         return Ok(views(state)["Items"]
@@ -80,6 +100,7 @@ pub async fn get_folder(state: &AppState, id: &str) -> Result<Value> {
         series_id(item.series_name.as_deref().unwrap_or("")) != id,
     ))
 }
+/// List virtual folders or source items using the supported Jellyfin navigation filters.
 pub async fn list(
     state: &AppState,
     user: &User,

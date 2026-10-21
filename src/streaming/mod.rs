@@ -1,3 +1,9 @@
+//! Authenticated media delivery, artwork and path containment.
+//!
+//! The stream pipeline is implemented by functions rather than a `StreamPipeline`
+//! type: resolve a catalog item, canonicalize its path, select audio, then dispatch
+//! to [`direct`], [`transcode`] or [`hls`]. Audio ordinals are distinct from ffprobe
+//! stream indices. Paths from the database are always rechecked against allowed roots.
 
 pub mod direct;
 pub mod hardware;
@@ -17,18 +23,26 @@ use axum::{
 use serde::Deserialize;
 use std::path::{Path as FsPath, PathBuf};
 
+/// Native and Jellyfin stream options; absolute stream indices and audio ordinals differ.
 #[derive(Default, Deserialize)]
 pub struct StreamQuery {
+    /// Delivery mode: direct, remux or transcode.
     pub mode: Option<String>,
+    /// Zero-based ordinal among audio streams only.
     pub audio_index: Option<usize>,
+    /// Absolute ffprobe audio stream index, translated to an audio-only ordinal.
     #[serde(rename = "AudioStreamIndex")]
     pub audio_stream_index: Option<u64>,
+    /// Requested start position in seconds.
     pub start_seconds: Option<f64>,
+    /// Jellyfin start position in 100-nanosecond ticks.
     #[serde(rename = "StartTimeTicks")]
     pub start_ticks: Option<u64>,
+    /// Jellyfin Static flag; false requests a remux by default.
     #[serde(rename = "Static")]
     pub direct: Option<bool>,
 }
+/// The DB is an index, never permission to read outside the configured media root.
 pub async fn safe_path(state: &AppState, path: &str) -> Result<PathBuf> {
     let path = tokio::fs::canonicalize(FsPath::new(path)).await?;
     if !path.starts_with(&state.config.media_path) {
@@ -36,6 +50,7 @@ pub async fn safe_path(state: &AppState, path: &str) -> Result<PathBuf> {
     }
     Ok(path)
 }
+/// Validate stream options and dispatch original, remuxed or converted media.
 pub async fn stream(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -120,6 +135,7 @@ pub async fn stream(
         )),
     }
 }
+/// Serve local or cached poster artwork for a media or virtual catalog item.
 pub async fn poster(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -128,6 +144,7 @@ pub async fn poster(
 ) -> Result<Response> {
     artwork(&state, &id, false, &headers, &method).await
 }
+/// Serve local or cached backdrop artwork for a media or virtual catalog item.
 pub async fn backdrop(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -177,6 +194,7 @@ async fn artwork(
     )
     .await
 }
+/// Serve artwork only after canonical containment checks against media/cache roots.
 pub async fn artwork_file(
     state: &AppState,
     original: &str,

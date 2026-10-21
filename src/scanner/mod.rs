@@ -1,3 +1,11 @@
+//! Recursive media discovery and transactional catalog reconciliation.
+//!
+//! A single scan walks directories asynchronously, skips symbolic links and trailer
+//! sidecars, and recognizes common video extensions. Unchanged size/mtime/probe-version
+//! records reuse ffprobe results. Local NFO metadata and artwork take precedence over
+//! filename hints and optional background enrichment. Only a complete scan hides
+//! missing files; partial scans preserve the previous available inventory.
+//! Directory walking is sequential and does not implement gitignore-style rules.
 
 pub mod frames;
 pub mod metadata;
@@ -14,13 +22,18 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command};
 
+/// Counters and completeness of one library scan.
 #[derive(Default, Serialize)]
 pub struct ScanReport {
+    /// Number of successfully indexed files.
     pub indexed: usize,
+    /// Number of files that could not be indexed.
     pub failed: usize,
+    /// Whether the scan can safely reconcile missing files.
     pub complete: bool,
 }
 
+/// A scan was requested while another scan owns the scan lock.
 #[derive(Debug, thiserror::Error)]
 #[error("scan already running")]
 pub struct ScanBusy;
@@ -80,6 +93,10 @@ async fn probe(state: &AppState, path: &Path) -> anyhow::Result<Value> {
     result?
 }
 
+/// Walk the configured root and update the catalog while preserving availability after partial failure.
+///
+/// # Errors
+/// Returns an error for overlapping scans, cancellation, unreadable directories or database failures.
 pub async fn scan(state: &AppState) -> anyhow::Result<ScanReport> {
     let _guard = state.scan_lock.try_lock().map_err(|_| ScanBusy)?;
     let root = &state.config.media_path;

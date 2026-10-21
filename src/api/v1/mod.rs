@@ -1,3 +1,4 @@
+//! Native browser API for catalog discovery, health, playback and profiles.
 
 pub mod curation;
 pub mod hierarchy;
@@ -18,6 +19,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// Build native routes requiring session authentication.
 pub fn router() -> Router<AppState> {
     Router::new()
         .merge(hierarchy::router())
@@ -39,17 +41,23 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/logout", post(auth::logout))
         .route("/api/v1/playback", get(playback).post(progress))
 }
+/// Check database connectivity and report health and package version.
 pub async fn health(State(state): State<AppState>) -> Result<Json<Value>> {
     sqlx::query("SELECT 1").execute(&state.pool).await?;
     Ok(Json(
         json!({"status":"ok", "version":env!("CARGO_PKG_VERSION")}),
     ))
 }
+/// Native catalog filtering and bounded pagination.
 #[derive(Default, Deserialize)]
 pub struct CatalogQuery {
+    /// Catalog discriminator, normally movie or episode.
     pub kind: Option<String>,
+    /// Case-insensitive title search string.
     pub search: Option<String>,
+    /// Zero-based record offset.
     pub offset: Option<i64>,
+    /// Maximum records requested, clamped by the handler.
     pub limit: Option<i64>,
 }
 async fn catalog(state: &AppState, q: CatalogQuery) -> Result<Json<Value>> {
@@ -99,17 +107,25 @@ async fn scan(State(state): State<AppState>) -> Result<Json<scanner::ScanReport>
         }
     })
 }
+/// Playback update; positions use 100-nanosecond ticks and profiles remain account-scoped.
 #[derive(Deserialize)]
 pub struct Progress {
+    /// Source media identifier.
     pub item_id: String,
+    /// Owned profile identifier; omission selects the account default.
     pub profile_id: Option<String>,
+    /// Whether playback should be marked complete.
     pub completed: Option<bool>,
+    /// Playback position in 100-nanosecond ticks.
     pub position_ticks: i64,
+    /// Whether the client is currently paused.
     #[serde(default)]
     pub is_paused: bool,
+    /// Whether the playback session has stopped.
     #[serde(default)]
     pub stopped: bool,
 }
+/// Validate account-owned profile/media IDs and persist playback ticks transactionally.
 pub async fn save_progress(state: &AppState, user: &User, progress: Progress) -> Result<()> {
     if progress.position_ticks < 0 {
         return Err(AppError::BadRequest("negative position".into()));

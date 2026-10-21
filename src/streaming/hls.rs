@@ -1,3 +1,5 @@
+//! Stateless VOD HLS: independently encoded six-second TS segments, no shared
+//! temporary files or sessions. Each request remains authenticated and bounded.
 use crate::{
     AppState,
     auth::MediaToken,
@@ -11,8 +13,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+/// HLS audio selection shared by playlist and segment requests.
 #[derive(Default, Deserialize)]
 pub struct HlsQuery {
+    /// Zero-based ordinal among audio streams only.
     pub audio_index: Option<usize>,
 }
 fn audio(item: &db::MediaItem, q: &HlsQuery) -> Result<()> {
@@ -32,6 +36,7 @@ fn duration(item: &db::MediaItem) -> Result<f64> {
         .filter(|n| n.is_finite() && *n > 0.0 && *n <= 604800.0)
         .ok_or_else(|| AppError::BadRequest("HLS requires a probed duration".into()))
 }
+/// Build an authenticated six-second-segment VOD playlist with explicit discontinuities.
 pub async fn playlist(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -71,6 +76,7 @@ pub async fn playlist(
     )
         .into_response())
 }
+/// Validate a segment number and encode its bounded time window without temporary files.
 pub async fn segment(
     State(state): State<AppState>,
     Path((id, segment)): Path<(String, String)>,

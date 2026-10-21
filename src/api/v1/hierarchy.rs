@@ -1,3 +1,4 @@
+//! Relational catalog and account-scoped profiles (Codex, 2026-10-21).
 use super::CatalogQuery;
 use crate::{
     AppState,
@@ -13,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
+/// Build relational catalog and account-scoped profile routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/shows", get(shows))
@@ -64,6 +66,7 @@ async fn page(
         .map_err(|e| AppError::Internal(e.into()))?;
     Ok(Json(json!({"items":items,"total":total})))
 }
+/// List available shows with bounded pagination and title filtering.
 pub async fn shows(
     State(state): State<AppState>,
     Query(q): Query<CatalogQuery>,
@@ -230,12 +233,17 @@ async fn delete_profile(
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
+/// Account-owned profile selection and playback-history pagination.
 #[derive(Default, Deserialize)]
 pub struct ProfileQuery {
+    /// Owned profile identifier; omission selects the account default.
     pub profile_id: Option<String>,
+    /// Maximum records requested, clamped by the handler.
     pub limit: Option<i64>,
+    /// Zero-based record offset.
     pub offset: Option<i64>,
 }
+/// Resolve an explicitly owned profile or the authenticated account default.
 pub async fn resolve_profile(pool: &SqlitePool, user: &User, id: Option<&str>) -> Result<String> {
     sqlx::query_scalar(
         "SELECT id FROM profiles WHERE user_id=? AND ((? IS NULL AND is_default=1) OR id=?)",

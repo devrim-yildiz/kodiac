@@ -1,8 +1,10 @@
+//! Bounded, sanitized event history: no raw HTTP URLs or credentials.
 use std::{
     collections::VecDeque,
     sync::{LazyLock, Mutex},
 };
 static EVENTS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+/// Append a caller-sanitized message to the bounded event history; never pass secrets.
 pub fn event(text: &str) {
     if let Ok(mut q) = EVENTS.lock() {
         if q.len() >= 100 {
@@ -18,6 +20,7 @@ pub fn event(text: &str) {
         ));
     }
 }
+/// Snapshot the most recent 100 event messages in insertion order.
 pub fn recent() -> Vec<String> {
     EVENTS
         .lock()
@@ -25,6 +28,7 @@ pub fn recent() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Retain messages only: arbitrary debug fields may include private paths or URLs.
 pub struct LogLayer;
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogLayer {
     fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {

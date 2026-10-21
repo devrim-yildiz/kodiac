@@ -1,3 +1,4 @@
+//! Account bootstrap, Argon2 password verification and expiring hashed session tokens.
 
 use crate::{
     AppState,
@@ -24,15 +25,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Authenticated account identity inserted into request extensions.
 #[derive(Clone, Debug)]
 pub struct User {
+    /// Stable identifier of this record.
     pub id: String,
+    /// Account username.
     pub username: String,
 }
 fn hash_token(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
+/// Create the initial administrator with an Argon2 hash; existing accounts are preserved.
+///
+/// # Errors
+/// Fails on a missing/short initial password, invalid username, hashing or database errors.
 pub async fn bootstrap(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
@@ -72,13 +80,17 @@ pub async fn bootstrap(pool: &SqlitePool, config: &Config) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Native or Jellyfin login credentials; must never be logged.
 #[derive(Deserialize)]
 pub struct Credentials {
+    /// Account username.
     #[serde(alias = "Username")]
     pub username: String,
+    /// Plaintext password supplied for verification; never log or persist it.
     #[serde(alias = "Pw", alias = "Password")]
     pub password: String,
 }
+/// Verify credentials under login budgets and return the account plus a new expiring token.
 pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<(User, String)> {
     // Bound expensive password hashing and brute force attempts. Global budget is deliberate
     // for this single-household MVP; it does not trust spoofable proxy IP headers.
@@ -141,6 +153,7 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
     .await?;
     Ok((User { id, username }, token))
 }
+/// Format a strict HttpOnly session cookie with lifetime in seconds and optional Secure flag.
 pub fn cookie(state: &AppState, token: &str, age: u64) -> String {
     format!(
         "media_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={age}{}",
@@ -151,6 +164,7 @@ pub fn cookie(state: &AppState, token: &str, age: u64) -> String {
         }
     )
 }
+/// Authenticate native JSON credentials and set the browser session cookie.
 pub async fn login(
     State(state): State<AppState>,
     Json(credentials): Json<Credentials>,
@@ -193,6 +207,7 @@ fn header_token(headers: &HeaderMap) -> Option<String> {
                 .find_map(|s| s.trim().strip_prefix("media_session=").map(str::to_owned))
         })
 }
+/// Validate a session from supported headers, cookie or read-only media query parameters.
 pub async fn require_auth(
     State(state): State<AppState>,
     mut req: Request,
@@ -224,10 +239,13 @@ pub async fn require_auth(
     req.extensions_mut().insert(MediaToken(token));
     Ok(next.run(req).await)
 }
+/// SHA-256 session-token digest used to revoke the current session.
 #[derive(Clone)]
 pub struct TokenHash(pub String);
+/// Request-scoped token for authenticated media URLs; never serialized or logged.
 #[derive(Clone)]
 pub struct MediaToken(pub String);
+/// Revoke the current session digest and expire its browser cookie.
 pub async fn logout(
     State(state): State<AppState>,
     axum::Extension(token): axum::Extension<TokenHash>,

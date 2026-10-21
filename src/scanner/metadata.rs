@@ -1,4 +1,6 @@
+//! Optional cached TMDB metadata and artwork retrieval through the shared request budget.
 
+//! Optional TMDB fallback. Credentials never enter cache keys, stored JSON or logs.
 use crate::{
     AppState,
     scanner::{nfo::Nfo, scene::Scene},
@@ -24,6 +26,7 @@ async fn bounded(response: reqwest::Response, maximum: usize) -> anyhow::Result<
     }
     Ok(data)
 }
+/// Read cached TMDB JSON or fetch it through the shared rate limiter.
 pub async fn get(state: &AppState, route: &str, query: &[(&str, String)]) -> anyhow::Result<Value> {
     let key = serde_json::to_string(&(route, query, &state.config.tmdb_language))?;
     if let Some(json) = sqlx::query_scalar::<_, String>("SELECT response_json FROM metadata_cache WHERE cache_key=? AND fetched_at>unixepoch()-2592000").bind(&key).fetch_optional(&state.pool).await? {
@@ -89,24 +92,41 @@ async fn image(state: &AppState, value: &Value) -> anyhow::Result<Option<String>
             .into_owned(),
     ))
 }
+/// Remote metadata and cached artwork ready for a catalog update.
 pub struct Enrichment {
+    /// Credits as name, role and optional TMDB person identifier.
     pub people: Vec<(String, String, Option<i64>)>,
+    /// Optional rating on a ten-point scale.
     pub rating: Option<f64>,
+    /// Optional remote trailer video identifier.
     pub trailer_key: Option<String>,
+    /// Normalized metadata fields reused by the enrichment pipeline.
     pub nfo: Nfo,
+    /// Cached poster filename, if retrieval succeeded.
     pub poster: Option<String>,
+    /// Cached backdrop filename, if retrieval succeeded.
     pub backdrop: Option<String>,
+    /// Cached episode still filename, if available.
     pub still: Option<String>,
+    /// TMDB movie or show identifier.
     pub tmdb_id: i64,
+    /// TMDB episode identifier, if resolved.
     pub episode_tmdb_id: Option<i64>,
+    /// Remote season description.
     pub season_overview: String,
+    /// Remote show display title.
     pub show_title: String,
+    /// Remote show description.
     pub show_overview: String,
+    /// Serialized remote genre records.
     pub genres_json: String,
+    /// Cached season poster filename.
     pub season_poster: Option<String>,
+    /// Remote movie collection data, if available.
     pub collection: Option<Value>,
 }
 
+/// Resolve a filename hint to TMDB metadata and download bounded cached artwork.
 pub async fn fetch(
     state: &AppState,
     scene: &Scene,

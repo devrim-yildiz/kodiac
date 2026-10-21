@@ -1,3 +1,4 @@
+//! Authenticated local previews and sequential episode discovery.
 use crate::{
     AppState,
     error::{AppError, Result},
@@ -11,6 +12,7 @@ use axum::{
     routing::get,
 };
 use serde_json::{Value, json};
+/// Build local trailer, theme and next-episode discovery routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/items/{id}/experience", get(experience))

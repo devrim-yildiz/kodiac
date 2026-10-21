@@ -1,3 +1,4 @@
+//! Runtime settings and diagnostics. Codex, 2026-10-21.
 use crate::{
     AppState,
     auth::User,
@@ -11,6 +12,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
+/// Build administrator settings/diagnostics and authenticated playback-default routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/settings", get(read).post(write))
@@ -19,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/settings/verify", post(verify))
         .route("/api/v1/playback-defaults", get(defaults))
 }
+/// Require the authenticated account to have the persisted administrator flag.
 pub async fn admin(state: &AppState, user: &User) -> Result<()> {
     if !sqlx::query_scalar::<_, bool>("SELECT is_admin FROM users WHERE id=?")
         .bind(&user.id)
@@ -29,6 +32,7 @@ pub async fn admin(state: &AppState, user: &User) -> Result<()> {
     }
     Ok(())
 }
+/// Read persisted runtime settings; results may contain secrets and must not be logged.
 pub async fn values(state: &AppState) -> Result<BTreeMap<String, String>> {
     Ok(
         sqlx::query_as::<_, (String, String)>("SELECT key,value FROM server_settings")
@@ -38,6 +42,7 @@ pub async fn values(state: &AppState) -> Result<BTreeMap<String, String>> {
             .collect(),
     )
 }
+/// Clone shared state with persisted metadata and hardware overrides applied.
 pub async fn effective(state: &AppState) -> Result<AppState> {
     let v = values(state).await?;
     let mut s = state.clone();

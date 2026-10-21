@@ -1,3 +1,20 @@
+//! Supervised FFmpeg remuxing and conversion over bounded in-memory FIFO buffers.
+//!
+//! The transcoder is a set of async functions rather than a `Transcoder` struct.
+//! An atomic `try_acquire_owned` on the shared Tokio semaphore admits each job;
+//! its owned permit survives until the supervisor kills and reaps the process.
+//! A four-entry channel applies backpressure to stdout reads (64 KiB per chunk).
+//! Startup reads are separately capped at 8 MiB and twelve seconds.
+//!
+//! # Fragmented MP4 and Safari
+//!
+//! FFmpeg emits `ftyp`/`moov` followed by `moof`/`mdat`, using `empty_moov` and
+//! `default_base_moof`. Audio retains the AAC sample-rate timescale written by the
+//! muxer; this server does not rewrite MP4 audio timing boxes or impose a video
+//! timescale on AAC. Safari/MSE must use the actual track timescales. Copy seeks
+//! start at a preceding keyframe: `x-media-start-seconds` exposes that decode origin
+//! so the browser can set its SourceBuffer timestamp offset. Hardware Safari playback
+//! still requires device testing; a successful mux does not establish compatibility.
 
 use crate::{
     AppState,
@@ -10,6 +27,9 @@ use std::{io, path::Path, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command, sync::mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
+/// A bounded channel provides pipe backpressure. The supervisor owns/reaps the child,
+/// kills it on disconnect, shutdown, idle timeout or maximum runtime, and holds the
+/// concurrency permit until the process has actually exited.
 pub async fn serve(
     state: &AppState,
     path: &Path,
@@ -19,6 +39,7 @@ pub async fn serve(
     serve_selected(state, path, transcode, start_seconds, None).await
 }
 
+/// Map the first video and selected audio ordinal while dropping subtitle/data streams and metadata.
 pub fn mapping_args(audio_index: Option<usize>) -> Vec<String> {
     vec![
         "-map".into(),
@@ -48,6 +69,10 @@ fn has_media_fragment(bytes: &[u8]) -> bool {
     }
     false
 }
+/// Remux or encode one selected audio track using effective runtime settings.
+///
+/// # Errors
+/// Returns busy if no permit is available, or a pipeline error if no backend initializes.
 pub async fn serve_selected(
     state: &AppState,
     path: &Path,
@@ -59,6 +84,7 @@ pub async fn serve_selected(
     let state = &effective;
     serve_output(state, path, transcode, start_seconds, audio_index, false).await
 }
+/// Encode one six-second H.264/AAC MPEG-TS segment starting at the requested time.
 pub async fn serve_segment(
     state: &AppState,
     path: &Path,
@@ -239,6 +265,9 @@ async fn serve_output(
         .map_err(|e| AppError::Internal(e.into()))
 }
 
+/// The MP4 pipe normalizes its first decode timestamp to zero. A copy seek starts
+/// at a preceding keyframe; expose that actual origin so browser MSE can map the
+/// bytes back to the full media timeline rather than shifting footage by a GOP.
 async fn remux_origin(state: &AppState, path: &Path, seconds: f64) -> Result<f64> {
     let mut child = Command::new(&state.config.ffprobe)
         .kill_on_drop(true)

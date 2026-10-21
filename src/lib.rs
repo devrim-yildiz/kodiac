@@ -1,4 +1,35 @@
+//! Medienserver is a personal media server with an embedded browser client.
+//!
+//! # Process model
+//!
+//! Axum 0.8 routes the native API and a subset of the Jellyfin HTTP contract on
+//! one Tokio runtime. [`AppState`] shares the SQLite pool, cancellation token,
+//! metadata client and concurrency budgets across handlers and background workers.
+//!
+//! # Media delivery
+//!
+//! [`streaming`] serves original files with byte ranges or supervises FFmpeg for
+//! fragmented MP4 remuxing and H.264/AAC conversion. Remuxing copies compressed
+//! packets without decoding; output travels through an OS pipe and bounded memory
+//! channel without temporary segment files. The HTTP bridge copies byte buffers;
+//! it is not a kernel zero-copy transport. FFmpeg and ffprobe are runtime dependencies.
+//!
+//! # Persistence and discovery
+//!
+//! [`db`] applies embedded SQL migrations and enables SQLite WAL with foreign keys.
+//! [`scanner`] discovers media, reads NFO metadata and queues optional TMDB enrichment.
+//! [`api::jellyfin`] translates discovery, navigation, playback profiles and progress
+//! for clients implementing the supported Jellyfin subset. It is not a complete
+//! Jellyfin server implementation.
+//!
+//! # Embedding
+//!
+//! Build the frontend with `npm ci --prefix web && npm run build --prefix web`
+//! before compiling Rust, including documentation builds. Then create a [`config::Config`],
+//! connect and migrate with [`db::connect`], initialize authentication with
+//! [`auth::bootstrap`], construct [`AppState::new`] and serve [`router`].
 
+#![warn(missing_docs)]
 
 pub mod api;
 pub mod auth;
@@ -14,23 +45,41 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+/// Shared runtime resources cloned into handlers and background workers.
 #[derive(Clone)]
 pub struct AppState {
+    /// Current immutable fuzzy-search snapshot.
     pub search_index: Arc<tokio::sync::RwLock<Arc<api::v1::curation::SearchIndex>>>,
+    /// Monotonic startup instant used for uptime.
     pub started: std::time::Instant,
+    /// Latest scan progress exposed by administrator diagnostics.
     pub scan_status: Arc<Mutex<serde_json::Value>>,
+    /// Shared SQLite connection pool.
     pub pool: sqlx::SqlitePool,
+    /// Shared rate-limited metadata HTTP client.
     pub tmdb: Arc<scanner::tmdb_worker::TmdbClient>,
+    /// Startup settings shared by runtime tasks.
     pub config: Arc<config::Config>,
+    /// Persistent server identity read from settings.
     pub server_id: Arc<String>,
+    /// Admission budget shared by remux and conversion jobs.
     pub transcodes: Arc<Semaphore>,
+    /// Separate limit for concurrent subtitle extraction processes.
     pub subtitle_slots: Arc<Semaphore>,
+    /// Limit for concurrent expensive password verifications.
     pub login_slots: Arc<Semaphore>,
+    /// Global login-attempt window and attempt count.
     pub login_window: Arc<Mutex<(std::time::Instant, u32)>>,
+    /// Exclusive guard against overlapping scans.
     pub scan_lock: Arc<Mutex<()>>,
+    /// Cooperative cancellation signal for HTTP streams and workers.
     pub shutdown: CancellationToken,
 }
 impl AppState {
+    /// Load persistent server identity and allocate shared worker budgets.
+    ///
+    /// # Errors
+    /// Returns an error if server identity cannot be read or the metadata client cannot initialize.
     pub async fn new(pool: sqlx::SqlitePool, config: config::Config) -> anyhow::Result<Self> {
         let server_id =
             sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='server_id'")
@@ -54,6 +103,10 @@ impl AppState {
     }
 }
 
+/// Compose authenticated native/Jellyfin routes and embedded SPA delivery.
+///
+/// # Errors
+/// Returns an error when a configured CORS origin is not a valid header value.
 pub fn router(state: AppState) -> anyhow::Result<axum::Router> {
     use axum::{
         http::{HeaderValue, Method, header},

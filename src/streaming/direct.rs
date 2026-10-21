@@ -1,3 +1,4 @@
+//! Original-file responses with ETags, HEAD, single byte ranges and shutdown cancellation.
 
 use super::range::{self, Range};
 use crate::error::{AppError, Result};
@@ -14,6 +15,10 @@ use tokio::{
 };
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
+/// Stream an original file with HEAD, validators and single-range support.
+///
+/// # Errors
+/// Returns filesystem errors or not-found if the target is not a regular file.
 pub async fn serve(
     path: &Path,
     headers: &HeaderMap,

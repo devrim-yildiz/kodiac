@@ -1,15 +1,21 @@
+//! PascalCase Jellyfin response projections from local users and probed source media.
 
 use crate::{auth::User, db::MediaItem};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+/// Paginated Jellyfin Items response with total count and starting offset.
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsResponse {
+    /// Records in the current page.
     pub items: Vec<Value>,
+    /// Total matching records before pagination.
     pub total_record_count: i64,
+    /// Zero-based first record offset.
     pub start_index: i64,
 }
+/// Project a local account into a Jellyfin user response.
 pub fn user(user: &User, server: &str) -> Value {
     json!({"Id":user.id,"Name":user.username,"ServerId":server,"HasPassword":true,"HasConfiguredPassword":true,"HasConfiguredEasyPassword":false,
         "Configuration":{"AudioLanguagePreference":"","PlayDefaultAudioTrack":true,"SubtitleMode":"Default","EnableNextEpisodeAutoPlay":true},
@@ -22,6 +28,7 @@ fn video_range(stream: &Value) -> &'static str {
         _ => "SDR",
     }
 }
+/// Project probed tracks and source properties into Jellyfin MediaSourceInfo.
 pub fn source(item: &MediaItem) -> Value {
     let raw: Vec<Value> = serde_json::from_str(&item.streams_json).unwrap_or_default();
     let streams: Vec<Value> = raw.iter().map(|stream| json!({
@@ -41,6 +48,7 @@ pub fn source(item: &MediaItem) -> Value {
         "IsRemote":false,"RequiresOpening":false,"RequiresClosing":false,"MediaStreams":streams,
         "DefaultAudioStreamIndex":raw.iter().find(|s|s["codec_type"]=="audio").map(|s|s["index"].clone())})
 }
+/// Project one media item with server identity and persisted resume ticks.
 pub fn item(item: &MediaItem, server: &str, position: i64) -> Value {
     json!({"Id":item.id,"ServerId":server,"Name":item.title,"Overview":item.plot,"ProductionYear":item.year,
         "Type":if item.kind=="episode" {"Episode"} else {"Movie"},"MediaType":"Video","IsFolder":false,

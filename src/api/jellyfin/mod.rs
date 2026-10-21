@@ -1,3 +1,11 @@
+//! Jellyfin-compatible HTTP subset for discovery, library views and playback.
+//!
+//! Public routes expose server identity and account login. Protected routes use the
+//! same token validation and catalog as the native API. [`navigation`] presents
+//! Movies and Series UserViews; [`negotiation`] checks device profiles before
+//! advertising original files, MP4 remuxing or H.264/AAC conversion. Infuse and
+//! Swiftfin use this contract, but this release does not certify all versions or
+//! physical Apple devices. Unsupported Jellyfin administration and plugins are absent.
 
 pub mod dto;
 pub mod navigation;
@@ -21,12 +29,14 @@ use navigation::ItemQuery;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// Build identity and authentication routes that do not require an existing session.
 pub fn public_router() -> Router<AppState> {
     Router::new()
         .route("/System/Info/Public", get(info))
         .route("/Users/AuthenticateByName", post(login))
         .route("/Users/Public", get(|| async { Json(json!([])) }))
 }
+/// Build Jellyfin routes that must be wrapped in authentication middleware.
 pub fn protected_router() -> Router<AppState> {
     Router::new()
         .route("/System/Info", get(info))

@@ -1,3 +1,5 @@
+//! Persistent local-first enrichment queue with a shared token bucket.
+//! Codex, 2026-10-21. All metadata and artwork requests share the same budget.
 use crate::{
     AppState,
     scanner::{metadata, scene::Scene},
@@ -10,6 +12,7 @@ struct Bucket {
     updated: Instant,
     blocked_until: Instant,
 }
+/// HTTP client with a shared four-token bucket refilled at four requests per second.
 pub struct TmdbClient {
     pub(crate) client: reqwest::Client,
     pub(crate) api_base: String,
@@ -19,6 +22,7 @@ pub struct TmdbClient {
     capacity: f64,
 }
 impl TmdbClient {
+    /// Create a redirect-disabled HTTP client with bounded timeouts and a shared token bucket.
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()
@@ -92,6 +96,8 @@ fn retry_after(header: Option<&str>) -> Duration {
         .unwrap_or(Duration::from_secs(60))
         .clamp(Duration::from_secs(1), Duration::from_secs(86400))
 }
+/// One durable job. A single worker owns the queue; no unbounded in-memory backlog.
+/// Cancellation drops any in-flight request/transaction. The pending job survives.
 pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
     let effective = crate::api::v1::settings::effective(state).await?;
     let state = &effective;
@@ -224,6 +230,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
     }
     Ok(true)
 }
+/// Poll durable enrichment jobs and stop cooperatively on server cancellation.
 pub async fn run(state: AppState) {
     loop {
         let work = tokio::select! {

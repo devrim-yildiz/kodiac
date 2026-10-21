@@ -1,12 +1,20 @@
+//! Single byte ranges. Unknown/malformed/multipart ranges are ignored (RFC 9110).
+/// Normalized single-range request, including full and unsatisfiable responses.
 #[derive(Debug, PartialEq)]
 pub enum Range {
+    /// Serve the complete representation.
     Full,
+    /// Serve one inclusive byte interval.
     Partial {
+        /// First byte offset.
         start: u64,
+        /// Last byte offset, inclusive.
         end: u64,
     },
+    /// A valid range cannot overlap the representation.
     Unsatisfiable,
 }
+/// Parse a single inclusive byte range, ignoring malformed or multipart requests.
 pub fn parse(value: Option<&str>, length: u64) -> Range {
     let Some(value) = value else {
         return Range::Full;

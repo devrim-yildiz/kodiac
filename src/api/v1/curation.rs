@@ -1,3 +1,4 @@
+//! Profile-scoped shelves, recommendations and a grouped fuzzy library index.
 use super::hierarchy::{ProfileQuery, resolve_profile};
 use crate::{
     AppState,
@@ -11,6 +12,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+/// Build home shelves, search and person-detail routes.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/hub/home", get(home))
@@ -18,6 +20,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/people/{name}", get(person))
 }
 const PROJECTION: &str = "json_object('id',t.id,'kind',t.kind,'title',t.title,'overview',t.overview,'year',t.year,'rating',t.rating,'stream_facts',json(t.streams_json),'runtime_seconds',t.runtime_seconds,'poster_url',t.poster_url,'backdrop_url',t.backdrop_url,'genres',json(t.genres_json),'show_id',t.show_id,'show_title',t.show_title,'season_id',t.season_id,'season_number',t.season_number,'episode_number',t.episode_number,'season_count',t.season_count,'episode_count',t.episode_count)";
+/// Project catalog titles using an internal SQL predicate and one bound argument.
+///
+/// The filter is trusted SQL supplied by server code; never pass user input as the predicate.
 pub async fn titles(s: &AppState, filter: &str, arg: &str) -> Result<Vec<Value>> {
     let rows: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT {PROJECTION} FROM cinematic_titles t WHERE {filter}"
@@ -120,6 +125,7 @@ async fn home(
 struct Search {
     q: String,
 }
+/// Immutable search snapshot swapped under a short write lock.
 #[derive(Default)]
 pub struct SearchIndex {
     ready: bool,
@@ -241,6 +247,7 @@ async fn person(State(s): State<AppState>, Path(name): Path<String>) -> Result<J
     Ok(Json(json!({"name":name,"bio":bio,"items":items})))
 }
 
+/// Refresh outside the search lock so warm searches never wait for catalog SQL.
 pub async fn run_index(s: AppState) {
     loop {
         let result = tokio::select! {_=s.shutdown.cancelled()=>break,r=build_index(&s)=>r};

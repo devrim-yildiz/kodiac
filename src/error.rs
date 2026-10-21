@@ -1,3 +1,4 @@
+//! Application errors mapped to cache-disabled HTTP responses without internal error details.
 
 use axum::{
     Json,
@@ -6,20 +7,28 @@ use axum::{
 };
 use serde_json::json;
 
+/// Application failure with a stable public HTTP mapping.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    /// No valid unexpired authentication token was supplied.
     #[error("authentication required")]
     Unauthorized,
+    /// The account lacks administrator privileges.
     #[error("administrator access required")]
     Forbidden,
+    /// The requested resource is missing or inaccessible.
     #[error("not found")]
     NotFound,
+    /// Invalid client input with a safe public explanation.
     #[error("{0}")]
     BadRequest(String),
+    /// A concurrency or attempt budget is exhausted; retry later.
     #[error("server busy; retry later")]
     Busy,
+    /// Media initialization or supervised processing failed.
     #[error("media pipeline failed or timed out")]
     Pipeline,
+    /// Internal failure logged server-side and hidden from clients.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -66,4 +75,5 @@ impl IntoResponse for AppError {
         response
     }
 }
+/// Application result returned by handlers and storage helpers.
 pub type Result<T> = std::result::Result<T, AppError>;

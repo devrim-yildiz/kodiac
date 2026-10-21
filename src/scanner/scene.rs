@@ -1,3 +1,4 @@
+//! Deterministic filename hints. Canonical punctuation and episode names come from NFO/TMDB.
 use regex::Regex;
 use std::sync::LazyLock;
 static EPISODE: LazyLock<Regex> =
@@ -7,13 +8,19 @@ static YEAR: LazyLock<Regex> =
 static RELEASE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|[ ._\-])(?:2160p|1080[pi]|720p|480p|german|english|multi|dl|dual|eac3|aac|dts|ac3|bluray|bdrip|webrip|web[ ._-]?dl|web|h26[45]|x26[45]|hevc|hdr|dv|sample)(?:[ ._\-]|$)").unwrap()
 });
+/// Deterministic filename hints; punctuation is not inferred.
 #[derive(Debug, PartialEq)]
 pub struct Scene {
+    /// Display title from local metadata, enrichment or filename hints.
     pub title: String,
+    /// Release year when known.
     pub year: Option<i64>,
+    /// Season number; zero denotes specials.
     pub season: Option<i64>,
+    /// Episode number when known.
     pub episode: Option<i64>,
 }
+/// Extract title, release year and SxxExx hints while stripping recognized release suffixes.
 pub fn parse(name: &str) -> Scene {
     let stem = name
         .rsplit_once('.')

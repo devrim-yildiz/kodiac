@@ -1,20 +1,38 @@
+//! Conservative Jellyfin PlaybackInfo device-profile matching.
+//!
+//! Direct-play profiles match container and codecs, codec/container conditions and
+//! bitrate limits. MP4 remuxing is advertised only for supported copied codecs;
+//! transcoding targets H.264/AAC in MP4 or six-second MPEG-TS HLS. Unsupported
+//! required conditions reject a match. Absolute AudioStreamIndex values are mapped
+//! to audio-only FFmpeg ordinals for clients such as Infuse. Swiftfin profiles use
+//! the same negotiation path. A request without a device profile is metadata discovery.
 
+//! Conservative profile matching: unsupported conditions never become a promise to play.
 use crate::{
     db::MediaItem,
     error::{AppError, Result},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+/// Optional client profile, selected tracks, resume position and delivery permissions.
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct PlaybackRequest {
+    /// Jellyfin DeviceProfile describing transport, codecs and constraints.
     pub device_profile: Option<Value>,
+    /// Absolute ffprobe audio stream index, translated to an audio-only ordinal.
     pub audio_stream_index: Option<u64>,
+    /// Absolute subtitle stream index, or -1 to disable subtitles.
     pub subtitle_stream_index: Option<i64>,
+    /// Requested resume position in 100-nanosecond ticks.
     pub start_time_ticks: Option<u64>,
+    /// Client bitrate ceiling in bits per second.
     pub max_streaming_bitrate: Option<u64>,
+    /// Whether the client permits delivery of the original file.
     pub enable_direct_play: Option<bool>,
+    /// Whether the client permits container remuxing.
     pub enable_direct_stream: Option<bool>,
+    /// Whether the client permits video conversion.
     pub enable_transcoding: Option<bool>,
 }
 fn accepts(list: &Value, codec: &str) -> bool {
@@ -81,6 +99,10 @@ fn conditions(profile: &Value, video: &Value, audio: &Value, bitrate: Option<u64
         })
     })
 }
+/// Evaluate a PlaybackInfo profile and build a media source with supported delivery URLs.
+///
+/// # Errors
+/// Returns bad-request when a requested absolute audio index does not exist.
 pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
     let mut source = super::dto::source(item);
     let streams: Vec<Value> = serde_json::from_str(&item.streams_json).unwrap_or_default();
