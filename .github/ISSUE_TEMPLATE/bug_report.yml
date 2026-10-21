@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible defect using sanitized evidence.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "For vulnerabilities, follow SECURITY.md. Never attach credentials, databases or private media."
+  - type: input
+    id: version
+    attributes:
+      label: Kodiac version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, install method, FFmpeg version, hardware mode and client version.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal synthetic example where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized logs or profile
+      description: Remove query tokens, passwords, keys, private paths and personal metadata.
+      render: text

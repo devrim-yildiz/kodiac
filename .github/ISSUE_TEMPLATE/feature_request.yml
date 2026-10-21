@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a focused improvement with a concrete use case.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Explain the limitation and who encounters it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: scope
+    attributes:
+      label: Compatibility and validation
+      description: Relevant clients, platforms, constraints and how success could be verified.

@@ -4,7 +4,7 @@ version = "1.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Personal media streaming server with an embedded web client and Jellyfin compatibility"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [dependencies]
 anyhow = "1"
