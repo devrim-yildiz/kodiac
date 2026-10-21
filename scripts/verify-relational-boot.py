@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="medienserver-boot-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="kodiac-boot-") as temporary:
         root = Path(temporary)
         media = root / "media"
         media.mkdir()
@@ -36,7 +36,7 @@ def main():
         secret.write_text(password)
         secret.chmod(0o600)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("TMDB_", "ADMIN_"))}
-        env["RUST_LOG"] = "medienserver=info"
+        env["RUST_LOG"] = "kodiac=info"
         for iteration in range(2):
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", 0))

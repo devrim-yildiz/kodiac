@@ -75,7 +75,7 @@ function Login() {
         <span className="brand-icon">
           <PlayMark />
         </span>
-        medienserver
+        kodiac
       </div>
       <div className="login-card">
         <span className="eyebrow">YOUR PRIVATE CINEMA</span>
@@ -461,12 +461,12 @@ function Cinema() {
               <button
                 className="brand"
                 onClick={browse}
-                aria-label="Medienserver home"
+                aria-label="Kodiac home"
               >
                 <span className="brand-icon">
                   <PlayMark />
                 </span>
-                <span>medienserver</span>
+                <span>kodiac</span>
               </button>
               <Tabs.Root
                 value={kind}
@@ -729,7 +729,7 @@ function Cinema() {
                 <Film size={15} /> Your library, beautifully at home.
               </span>
               <span>
-                <Sparkles size={13} /> MEDIENSERVER{" "}
+                <Sparkles size={13} /> KODIAC{" "}
                 <span className="footer-divider">/</span> PERSONAL CINEMA
               </span>
               <button

@@ -328,7 +328,7 @@ mod tests {
     async fn fixture(gate: bool) -> (TempDir, AppState, Mock, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::config::Config::parse_from([
-            "medienserver",
+            "kodiac",
             "--media-path",
             dir.path().to_str().unwrap(),
             "--db-path",

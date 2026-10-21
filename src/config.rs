@@ -27,7 +27,7 @@ pub struct Config {
     #[arg(long, env = "PORT", default_value_t = 8096)]
     pub port: u16,
     /// SQLite file selected by `--db-path` or `DB_PATH`; parent directories are created.
-    #[arg(long, env = "DB_PATH", default_value = "data/medienserver.db")]
+    #[arg(long, env = "DB_PATH", default_value = "data/kodiac.db")]
     pub db_path: PathBuf,
     /// Username created only when no account exists.
     #[arg(long, env = "ADMIN_USER", default_value = "admin")]

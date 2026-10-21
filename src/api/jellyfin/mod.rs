@@ -81,7 +81,7 @@ pub fn protected_router() -> Router<AppState> {
 }
 async fn info(State(state): State<AppState>) -> Json<Value> {
     Json(
-        json!({"Id":*state.server_id,"ServerName":"Medienserver","Version":"10.10.7","ServerVersion":env!("CARGO_PKG_VERSION"),"ProductName":"Medienserver","OperatingSystem":std::env::consts::OS,"StartupWizardCompleted":true}),
+        json!({"Id":*state.server_id,"ServerName":"Kodiac","Version":"10.10.7","ServerVersion":env!("CARGO_PKG_VERSION"),"ProductName":"Kodiac","OperatingSystem":std::env::consts::OS,"StartupWizardCompleted":true}),
     )
 }
 async fn login(

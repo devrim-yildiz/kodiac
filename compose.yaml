@@ -1,8 +1,8 @@
 services:
-  medienserver:
-    image: medienserver:latest
+  kodiac:
+    image: kodiac:latest
     build: .
-    container_name: medienserver
+    container_name: kodiac
     restart: unless-stopped
     ports:
       - "8097:8096"
@@ -14,7 +14,7 @@ services:
       - admin_password
     volumes:
       - ./data:/data
-      - ${MEDIENSERVER_MEDIA_PATH:?Set MEDIENSERVER_MEDIA_PATH to an existing media directory}:/media:ro
+      - ${KODIAC_MEDIA_PATH:?Set KODIAC_MEDIA_PATH to an existing media directory}:/media:ro
     command:
       - --media-path
       - /media

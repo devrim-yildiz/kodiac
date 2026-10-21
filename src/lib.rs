@@ -1,4 +1,4 @@
-//! Medienserver is a personal media server with an embedded browser client.
+//! Kodiac is a personal media server with an embedded browser client.
 //!
 //! # Process model
 //!

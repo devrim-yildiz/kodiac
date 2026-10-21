@@ -22,10 +22,10 @@ RUN apt-get update \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin media \
     && install -d -o media -g media /data
 
-COPY --from=build /build/target/release/medienserver /usr/local/bin/medienserver
+COPY --from=build /build/target/release/kodiac /usr/local/bin/kodiac
 USER 10001:10001
 WORKDIR /data
 ENV METADATA_PATH=/data/metadata
 EXPOSE 8096
-ENTRYPOINT ["medienserver"]
+ENTRYPOINT ["kodiac"]
 CMD ["--media-path", "/media", "--db-path", "/data/media.db", "--bind", "0.0.0.0"]

@@ -323,7 +323,7 @@ export function Player() {
                 <ChevronLeft size={18} /> Browse library
               </button>
               <span className="cinema-wordmark">
-                MEDIENSERVER <span>CINEMA</span>
+                KODIAC <span>CINEMA</span>
               </span>
               <button
                 className="icon-button glass"

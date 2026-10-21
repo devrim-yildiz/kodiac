@@ -405,7 +405,7 @@ export function Settings({
                 {status}
               </>
             ) : (
-              <span>MEDIENSERVER · CINEMATIC LUXURY · v1.1.0</span>
+              <span>KODIAC · CINEMATIC LUXURY · v1.1.0</span>
             )}
           </footer>
         </Dialog.Content>

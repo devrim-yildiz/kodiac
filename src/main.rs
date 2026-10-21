@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::Parser;
-use medienserver::{AppState, auth, config::Config, db, scanner};
+use kodiac::{AppState, auth, config::Config, db, scanner};
 use std::time::Duration;
 
 #[tokio::main]
@@ -9,10 +9,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "medienserver=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "kodiac=info,tower_http=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
-        .with(medienserver::diagnostics::LogLayer)
+        .with(kodiac::diagnostics::LogLayer)
         .init();
     let mut config = Config::parse();
     config.media_path = tokio::fs::canonicalize(&config.media_path)
@@ -30,10 +30,10 @@ async fn main() -> anyhow::Result<()> {
     auth::bootstrap(&pool, &config).await?;
     let address = (config.bind, config.port);
     let state = AppState::new(pool, config).await?;
-    let app = medienserver::router(state.clone())?;
+    let app = kodiac::router(state.clone())?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    medienserver::diagnostics::event("Server started");
-    let search_task = tokio::spawn(medienserver::api::v1::curation::run_index(state.clone()));
+    kodiac::diagnostics::event("Server started");
+    let search_task = tokio::spawn(kodiac::api::v1::curation::run_index(state.clone()));
     let frame_task = tokio::spawn(scanner::frames::run(state.clone()));
     let tmdb_task = tokio::spawn(scanner::tmdb_worker::run(state.clone()));
     let scan_state = state.clone();

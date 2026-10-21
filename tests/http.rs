@@ -3,7 +3,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use medienserver::{AppState, auth, config::Config, db, router, scanner};
+use kodiac::{AppState, auth, config::Config, db, router, scanner};
 use serde_json::{Value, json};
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -546,7 +546,7 @@ async fn real_ffmpeg_remux_transcode_failure_and_disconnect() {
         assert!(status.success());
     }
     // A remux seek maps the normalized pipe timestamps back to the original keyframe.
-    let response = medienserver::streaming::transcode::serve(&f.state, &path, false, 2.4)
+    let response = kodiac::streaming::transcode::serve(&f.state, &path, false, 2.4)
         .await
         .unwrap();
     let origin: f64 = response.headers()["x-media-start-seconds"]
@@ -585,12 +585,12 @@ async fn real_ffmpeg_remux_transcode_failure_and_disconnect() {
         (1.99..2.1).contains(&(first_pts + origin)),
         "keyframe timestamp lost: {first_pts} + {origin}"
     );
-    let response = medienserver::streaming::transcode::serve(&f.state, &path, true, 0.0)
+    let response = kodiac::streaming::transcode::serve(&f.state, &path, true, 0.0)
         .await
         .unwrap();
     assert_eq!(f.state.transcodes.available_permits(), 0);
     assert!(
-        medienserver::streaming::transcode::serve(&f.state, &path, true, 0.0)
+        kodiac::streaming::transcode::serve(&f.state, &path, true, 0.0)
             .await
             .is_err()
     );
@@ -604,7 +604,7 @@ async fn real_ffmpeg_remux_transcode_failure_and_disconnect() {
     .unwrap();
     tokio::fs::write(&path, b"not a video").await.unwrap();
     assert!(
-        medienserver::streaming::transcode::serve(&f.state, &path, true, 0.0)
+        kodiac::streaming::transcode::serve(&f.state, &path, true, 0.0)
             .await
             .is_err()
     );
@@ -1061,7 +1061,7 @@ async fn real_videotoolbox_and_initialization_fallback() {
         .unwrap();
     assert!(status.success());
     std::sync::Arc::make_mut(&mut f.state.config).hw_accel = "videotoolbox".into();
-    let response = medienserver::streaming::transcode::serve(&f.state, &path, true, 0.0)
+    let response = kodiac::streaming::transcode::serve(&f.state, &path, true, 0.0)
         .await
         .unwrap();
     assert_eq!(
@@ -1092,7 +1092,7 @@ async fn real_videotoolbox_and_initialization_fallback() {
         .await
         .unwrap();
     std::sync::Arc::make_mut(&mut f.state.config).ffmpeg = wrapper;
-    let response = medienserver::streaming::transcode::serve(&f.state, &path, true, 0.0)
+    let response = kodiac::streaming::transcode::serve(&f.state, &path, true, 0.0)
         .await
         .unwrap();
     assert_eq!(response.headers()["x-transcode-backend"], "software");
@@ -1371,7 +1371,7 @@ async fn cinematic_settings_are_admin_only_masked_atomic_and_dynamic() {
     let masked = value(response).await;
     assert!(!masked.to_string().contains("private-fixture-key"));
     assert_eq!(masked["tmdb_configured"], true);
-    let effective = medienserver::api::v1::settings::effective(&f.state)
+    let effective = kodiac::api::v1::settings::effective(&f.state)
         .await
         .unwrap();
     assert_eq!(

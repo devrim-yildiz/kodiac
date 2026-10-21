@@ -166,7 +166,7 @@ async fn migration_rolls_back_as_a_unit() {
 #[ignore = "requires MIGRATION_FIXTURE_DB pointing to a consistent, private beta snapshot"]
 async fn real_beta_snapshot_migrates_losslessly_and_reopens_idempotently() {
     use clap::Parser;
-    use medienserver::{config::Config, db};
+    use kodiac::{config::Config, db};
     let source = std::env::var("MIGRATION_FIXTURE_DB")
         .expect("MIGRATION_FIXTURE_DB must name a private SQLite snapshot");
     let dir = tempfile::tempdir().unwrap();
@@ -195,7 +195,7 @@ async fn real_beta_snapshot_migrates_losslessly_and_reopens_idempotently() {
     let sessions:Vec<String>=sqlx::query_scalar("SELECT json_array(id,user_id,media_item_id,position_ticks,is_paused,stopped,updated_at) FROM playback_sessions ORDER BY id").fetch_all(&mut original).await.unwrap();
     original.close().await.unwrap();
     let config = Config::parse_from([
-        "medienserver",
+        "kodiac",
         "--media-path",
         dir.path().to_str().unwrap(),
         "--db-path",

@@ -13,7 +13,7 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get('SPA_BINARY', ROOT / 'target/release/medienserver'))
+BINARY = Path(os.environ.get('SPA_BINARY', ROOT / 'target/release/kodiac'))
 PORT = int(os.environ.get('SPA_TEST_PORT', '18197'))
 
 
@@ -29,7 +29,7 @@ def artwork(path, title, color, landscape=False):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix='medienserver-spa-fixture-') as directory:
+    with tempfile.TemporaryDirectory(prefix='kodiac-spa-fixture-') as directory:
         root = Path(directory)
         media = root / 'media'
         media.mkdir()
@@ -45,7 +45,7 @@ def main():
             artwork(media / f'{name}-wide.svg', name, color, True)
         db = root / 'catalog.db'
         env = {k: v for k, v in os.environ.items() if not k.startswith(('TMDB_', 'ADMIN_'))}
-        env['RUST_LOG'] = 'medienserver=info'
+        env['RUST_LOG'] = 'kodiac=info'
         command = [str(BINARY), '--media-path', str(media), '--db-path', str(db), '--metadata-path', str(root / 'metadata'), '--admin-password-file', str(password), '--scan-interval-seconds', '0', '--hw-accel', 'software', '--port', str(PORT)]
         with (root / 'server.log').open('w+') as log:
             process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
