@@ -99,7 +99,10 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
         *window = (Instant::now(), 0);
     }
     if window.1 >= 30 {
-        return Err(AppError::Busy);
+        let remaining = Duration::from_secs(60).saturating_sub(window.0.elapsed());
+        return Err(AppError::RateLimited {
+            retry_after_seconds: remaining.as_secs().saturating_add(1).min(60),
+        });
     }
     window.1 += 1;
     drop(window);

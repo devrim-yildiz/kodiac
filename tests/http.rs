@@ -465,7 +465,10 @@ async fn expired_tokens_and_throttling() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    f.state.login_window.lock().await.1 = 30;
+    *f.state.login_window.lock().await = (
+        std::time::Instant::now() - std::time::Duration::from_secs(40),
+        30,
+    );
     let response = f
         .app
         .clone()
@@ -478,6 +481,25 @@ async fn expired_tokens_and_throttling() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=20).contains(&retry));
+
+    f.state.login_window.lock().await.1 = 0;
+    let _slots = f.state.login_slots.acquire_many(2).await.unwrap();
+    let response = f
+        .request(
+            "POST",
+            "/api/v1/login",
+            &[],
+            json!({"username":"admin","password":"bad"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key("retry-after"));
 }
 
 #[tokio::test]
@@ -618,7 +640,7 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
         f.request("POST", "/api/v1/scan", &[], Value::Null)
             .await
             .status(),
-        StatusCode::TOO_MANY_REQUESTS
+        StatusCode::SERVICE_UNAVAILABLE
     );
     drop(guard);
     tokio::fs::rename(
