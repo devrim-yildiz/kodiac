@@ -39,9 +39,8 @@ async fn main() -> anyhow::Result<()> {
     let scan_state = state.clone();
     let scan_task = tokio::spawn(async move {
         loop {
-            tokio::select! {
-                _ = scan_state.shutdown.cancelled() => break,
-                result = scanner::scan(&scan_state) => if let Err(error) = result { tracing::error!(%error, "scan failed; previous catalog retained"); }
+            if let Err(error) = scanner::scan(&scan_state).await {
+                tracing::error!(%error, "scan failed; previous catalog retained");
             }
             if scan_state.config.scan_interval_seconds == 0 {
                 break;

@@ -98,7 +98,40 @@ async fn probe(state: &AppState, path: &Path) -> anyhow::Result<Value> {
 /// # Errors
 /// Returns an error for overlapping scans, cancellation, unreadable directories or database failures.
 pub async fn scan(state: &AppState) -> anyhow::Result<ScanReport> {
-    let _guard = state.scan_lock.try_lock().map_err(|_| ScanBusy)?;
+    let guard = state
+        .scan_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| ScanBusy)?;
+    scan_locked(state, guard).await
+}
+
+pub(crate) async fn scan_locked(
+    state: &AppState,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+) -> anyhow::Result<ScanReport> {
+    *state.scan_status.lock().await =
+        serde_json::json!({"running":true,"indexed":0,"failed":0,"phase":"Indexing library"});
+    let result = tokio::select! {
+        _ = state.shutdown.cancelled() => Err(anyhow::anyhow!("scan cancelled")),
+        result = scan_library(state) => result,
+    };
+    let mut status = state.scan_status.lock().await;
+    status["running"] = false.into();
+    match &result {
+        Ok(report) => {
+            *status = serde_json::json!({"running":false,"indexed":report.indexed,"failed":report.failed,"complete":report.complete,"phase":"Scan complete; artwork enrichment continues"});
+            crate::diagnostics::event("Library scan completed");
+        }
+        Err(_) => {
+            status["complete"] = false.into();
+            status["phase"] = "Scan failed; previous catalog retained".into();
+        }
+    }
+    result
+}
+
+async fn scan_library(state: &AppState) -> anyhow::Result<ScanReport> {
     let root = &state.config.media_path;
     let root_text = root
         .to_str()
@@ -184,8 +217,6 @@ pub async fn scan(state: &AppState) -> anyhow::Result<ScanReport> {
         failed = report.failed,
         "scan finished"
     );
-    *state.scan_status.lock().await = serde_json::json!({"running":false,"indexed":report.indexed,"failed":report.failed,"phase":"Scan complete"});
-    crate::diagnostics::event("Library scan completed");
     Ok(report)
 }
 async fn index(

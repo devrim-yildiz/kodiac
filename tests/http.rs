@@ -643,6 +643,8 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
         StatusCode::SERVICE_UNAVAILABLE
     );
     drop(guard);
+    // Reproduce stale progress left by a failed scan after indexing a file.
+    *f.state.scan_status.lock().await = json!({"running":true,"indexed":1});
     tokio::fs::rename(
         &f.state.config.media_path,
         f._dir.path().join("temporarily-offline"),
@@ -650,7 +652,35 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
     .await
     .unwrap();
     assert!(scanner::scan(&f.state).await.is_err());
+    assert_eq!(f.state.scan_status.lock().await["running"], false);
     assert!(db::item(&f.state.pool, &f.item).await.is_ok());
+    tokio::fs::rename(
+        f._dir.path().join("temporarily-offline"),
+        &f.state.config.media_path,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.request("POST", "/api/v1/settings/rescan", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(guard) = f.state.scan_lock.try_lock() {
+                drop(guard);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.state.scan_status.lock().await["running"], false);
+    f.state.shutdown.cancel();
+    assert!(scanner::scan(&f.state).await.is_err());
+    assert_eq!(f.state.scan_status.lock().await["running"], false);
 }
 
 #[tokio::test]

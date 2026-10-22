@@ -156,22 +156,16 @@ async fn rescan(
     Extension(u): Extension<User>,
 ) -> Result<(StatusCode, Json<Value>)> {
     admin(&s, &u).await?;
-    let mut status = s.scan_status.lock().await;
-    if status["running"] == true || s.scan_lock.try_lock().is_err() {
-        return Err(AppError::Busy);
-    }
-    *status = json!({"running":true,"indexed":0,"failed":0,"phase":"Indexing library"});
-    drop(status);
+    let guard = s
+        .scan_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| AppError::Busy)?;
     let worker = s.clone();
     tokio::spawn(async move {
-        let result = crate::scanner::scan(&worker).await;
-        let mut status = worker.scan_status.lock().await;
-        *status = match result {
-            Ok(r) => {
-                json!({"running":false,"indexed":r.indexed,"failed":r.failed,"complete":r.complete,"phase":"Scan complete; artwork enrichment continues"})
-            }
-            Err(_) => json!({"running":false,"phase":"Scan failed; previous catalog retained"}),
-        };
+        if let Err(error) = crate::scanner::scan_locked(&worker, guard).await {
+            tracing::warn!(%error, "scan failed; previous catalog retained");
+        }
     });
     sqlx::query("UPDATE tmdb_jobs SET next_attempt_at=0,completed_at=NULL,attempts=0")
         .execute(&s.pool)
