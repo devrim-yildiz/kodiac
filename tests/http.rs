@@ -795,6 +795,39 @@ async fn nfo_rescans_replace_local_links_atomically() {
 }
 
 #[tokio::test]
+async fn diagnostics_count_extracted_artwork_with_either_separator() {
+    let f = Fixture::new().await;
+    for path in [
+        "/cache/extracted/frame.jpg",
+        r"C:\cache\extracted\frame.jpg",
+    ] {
+        sqlx::query("UPDATE media_items SET poster_path=?,backdrop_path=NULL WHERE id=?")
+            .bind(path)
+            .bind(&f.item)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let stats = value(
+            f.request("GET", "/api/v1/settings/stats", &[], Value::Null)
+                .await,
+        )
+        .await;
+        assert_eq!(stats["extracted_count"], 1);
+        sqlx::query("UPDATE media_items SET backdrop_path=poster_path,poster_path=NULL WHERE id=?")
+            .bind(&f.item)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let stats = value(
+            f.request("GET", "/api/v1/settings/stats", &[], Value::Null)
+                .await,
+        )
+        .await;
+        assert_eq!(stats["extracted_count"], 1);
+    }
+}
+
+#[tokio::test]
 async fn beta_navigation_profiles_images_and_progress() {
     let f = Fixture::new().await;
     let streams = json!([

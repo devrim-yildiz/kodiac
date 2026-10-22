@@ -206,7 +206,7 @@ async fn stats(State(s): State<AppState>, Extension(u): Extension<User>) -> Resu
         sqlx::query_scalar("SELECT count(*) FROM tmdb_jobs WHERE completed_at IS NULL")
             .fetch_one(&s.pool)
             .await?;
-    let frames:i64=sqlx::query_scalar("SELECT count(*) FROM media_items WHERE poster_path LIKE '%/extracted/%' OR backdrop_path LIKE '%/extracted/%'").fetch_one(&s.pool).await?;
+    let frames:i64=sqlx::query_scalar("SELECT count(*) FROM media_items WHERE replace(poster_path,char(92),'/') LIKE '%/extracted/%' OR replace(backdrop_path,char(92),'/') LIKE '%/extracted/%'").fetch_one(&s.pool).await?;
     let sessions:Vec<(String,String,i64)>=sqlx::query_as("SELECT i.title,p.name,h.position_ticks FROM playback_history h JOIN media_items i ON i.id=h.media_item_id JOIN profiles p ON p.id=h.profile_id WHERE h.stopped=0 AND h.updated_at>unixepoch()-30").fetch_all(&s.pool).await?;
     let ff = tokio::time::timeout(
         std::time::Duration::from_secs(3),

@@ -181,12 +181,12 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
                     }
                     sqlx::query("UPDATE media_items SET rating=COALESCE(rating,?),trailer_key=COALESCE(trailer_key,?) WHERE id=?").bind(data.rating).bind(data.trailer_key).bind(&id).execute(&mut *tx).await?;
                     // Replace extracted frames when official artwork becomes available.
-                    sqlx::query("UPDATE media_items SET poster_path=CASE WHEN poster_path LIKE '%/extracted/%' THEN COALESCE(?,poster_path) ELSE poster_path END,backdrop_path=CASE WHEN backdrop_path LIKE '%/extracted/%' THEN COALESCE(?,backdrop_path) ELSE backdrop_path END WHERE id=?").bind(&data.poster).bind(&data.backdrop).bind(&id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE media_items SET poster_path=CASE WHEN replace(poster_path,char(92),'/') LIKE '%/extracted/%' THEN COALESCE(?,poster_path) ELSE poster_path END,backdrop_path=CASE WHEN replace(backdrop_path,char(92),'/') LIKE '%/extracted/%' THEN COALESCE(?,backdrop_path) ELSE backdrop_path END WHERE id=?").bind(&data.poster).bind(&data.backdrop).bind(&id).execute(&mut *tx).await?;
 
                     sqlx::query("UPDATE media_items SET title=CASE WHEN local_metadata=0 THEN ? ELSE title END,plot=CASE WHEN plot='' THEN ? ELSE plot END,year=COALESCE(year,?),poster_path=COALESCE(poster_path,?),backdrop_path=COALESCE(backdrop_path,?) WHERE id=?")
                         .bind(&data.nfo.title).bind(&data.nfo.plot).bind(data.nfo.year).bind(&data.poster).bind(&data.backdrop).bind(&id).execute(&mut *tx).await?;
                     if kind == "episode" {
-                        sqlx::query("UPDATE shows SET poster_path=CASE WHEN poster_path LIKE '%/extracted/%' THEN COALESCE(?,poster_path) ELSE poster_path END,backdrop_path=CASE WHEN backdrop_path LIKE '%/extracted/%' THEN COALESCE(?,backdrop_path) ELSE backdrop_path END WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(&data.poster).bind(&data.backdrop).bind(&id).execute(&mut *tx).await?;
+                        sqlx::query("UPDATE shows SET poster_path=CASE WHEN replace(poster_path,char(92),'/') LIKE '%/extracted/%' THEN COALESCE(?,poster_path) ELSE poster_path END,backdrop_path=CASE WHEN replace(backdrop_path,char(92),'/') LIKE '%/extracted/%' THEN COALESCE(?,backdrop_path) ELSE backdrop_path END WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(&data.poster).bind(&data.backdrop).bind(&id).execute(&mut *tx).await?;
 
                         sqlx::query(
                             "UPDATE episodes SET still_path=COALESCE(still_path,?),tmdb_id=COALESCE(?,tmdb_id) WHERE id=?",
@@ -450,6 +450,50 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        server.abort();
+    }
+    #[tokio::test]
+    async fn official_artwork_replaces_extracted_frames_with_either_separator() {
+        let (_dir, state, _mock, server) = fixture(false).await;
+        for path in [
+            "/cache/extracted/frame.jpg",
+            r"C:\cache\extracted\frame.jpg",
+            "/library/poster.jpg",
+        ] {
+            sqlx::query("UPDATE media_items SET poster_path=?,backdrop_path=? WHERE id='ep'")
+                .bind(path)
+                .bind(path)
+                .execute(&state.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE shows SET poster_path=?,backdrop_path=?")
+                .bind(path)
+                .bind(path)
+                .execute(&state.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE tmdb_jobs SET next_attempt_at=0")
+                .execute(&state.pool)
+                .await
+                .unwrap();
+            assert!(run_once(&state).await.unwrap());
+            for table in ["media_items", "shows"] {
+                let (poster, backdrop): (String, String) =
+                    sqlx::query_as(&format!("SELECT poster_path,backdrop_path FROM {table}"))
+                        .fetch_one(&state.pool)
+                        .await
+                        .unwrap();
+                if path == "/library/poster.jpg" {
+                    assert_eq!(poster, path);
+                    assert_eq!(backdrop, path);
+                } else {
+                    assert_ne!(poster, path);
+                    assert_ne!(backdrop, path);
+                    assert!(std::path::Path::new(&poster).is_file());
+                    assert!(std::path::Path::new(&backdrop).is_file());
+                }
+            }
+        }
         server.abort();
     }
     #[tokio::test]
