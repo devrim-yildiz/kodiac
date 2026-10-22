@@ -91,7 +91,16 @@ async fn write(
     for (k, x) in &v {
         let valid = match k.as_str() {
             "tmdb_api_key" => x.len() <= 512 && !x.contains(char::is_whitespace),
-            "hw_accel" => ["auto", "software", "vaapi", "videotoolbox"].contains(&x.as_str()),
+            "hw_accel" => [
+                "auto",
+                "software",
+                "vaapi",
+                "nvenc",
+                "qsv",
+                "amf",
+                "videotoolbox",
+            ]
+            .contains(&x.as_str()),
             "transcode_preset" => {
                 ["ultrafast", "superfast", "veryfast", "fast", "medium"].contains(&x.as_str())
             }

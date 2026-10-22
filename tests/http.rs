@@ -1388,6 +1388,41 @@ async fn relational_catalog_profiles_and_continue_watching_are_isolated() {
 #[tokio::test]
 async fn cinematic_settings_are_admin_only_masked_atomic_and_dynamic() {
     let f = Fixture::new().await;
+    for mode in [
+        "auto",
+        "software",
+        "vaapi",
+        "nvenc",
+        "qsv",
+        "amf",
+        "videotoolbox",
+    ] {
+        assert_eq!(
+            f.request("POST", "/api/v1/settings", &[], json!({"hw_accel":mode}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            kodiac::api::v1::settings::effective(&f.state)
+                .await
+                .unwrap()
+                .config
+                .hw_accel,
+            mode
+        );
+    }
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/v1/settings",
+            &[],
+            json!({"hw_accel":"unknown"})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
     let response=f.request("POST","/api/v1/settings",&[],json!({"tmdb_api_key":"private-fixture-key","hw_accel":"software","audio_language_preference":"deu"})).await;
     assert_eq!(response.status(), StatusCode::OK);
     let masked = value(response).await;
