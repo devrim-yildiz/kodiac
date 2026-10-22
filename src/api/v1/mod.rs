@@ -98,7 +98,11 @@ async fn item(
 async fn me(Extension(user): Extension<User>) -> Json<Value> {
     Json(json!({"id":user.id,"username":user.username}))
 }
-async fn scan(State(state): State<AppState>) -> Result<Json<scanner::ScanReport>> {
+async fn scan(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+) -> Result<Json<scanner::ScanReport>> {
+    settings::admin(&state, &user).await?;
     scanner::scan(&state).await.map(Json).map_err(|error| {
         if error.is::<scanner::ScanBusy>() {
             AppError::Busy

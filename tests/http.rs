@@ -1444,6 +1444,12 @@ async fn cinematic_settings_are_admin_only_masked_atomic_and_dynamic() {
             .status(),
         StatusCode::FORBIDDEN
     );
+    assert_eq!(
+        f.request("POST", "/api/v1/scan", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]
