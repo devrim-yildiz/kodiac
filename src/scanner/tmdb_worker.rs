@@ -165,7 +165,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
                     return Ok(true);
                 }
                 if let Some(data) = result {
-                    for (name, role, person_id) in &data.people {
+                    for (name, role, person_id) in data.people.iter().filter(|_| !local) {
                         sqlx::query("INSERT INTO people(name,tmdb_id) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET tmdb_id=COALESCE(people.tmdb_id,excluded.tmdb_id)")
                             .bind(name).bind(person_id)
                             .execute(&mut *tx)
@@ -303,7 +303,7 @@ mod tests {
         let data = match path.as_str() {
             "search/movie" => json!({"results":[{"id":83,"title":"Alien Earth"}]}),
             "movie/83" => {
-                json!({"id":83,"title":"Alien Earth","overview":"Movie synopsis","poster_path":"/movie.jpg","backdrop_path":"/moviebackdrop.jpg","belongs_to_collection":{"id":99,"name":"Alien Collection"}})
+                json!({"id":83,"title":"Alien Earth","overview":"Movie synopsis","poster_path":"/movie.jpg","backdrop_path":"/moviebackdrop.jpg","belongs_to_collection":{"id":99,"name":"Alien Collection"},"credits":{"cast":[{"name":"Remote Actor","id":7}]}})
             }
             "search/tv" => json!({"results":[{"id":42,"name":"Alien Earth"}]}),
             "tv/42" => {
@@ -426,6 +426,23 @@ mod tests {
         assert!(row.3.is_some() && row.4.is_some());
         let collection:(String,i64)=sqlx::query_as("SELECT c.title,c.tmdb_id FROM collections c JOIN collection_movies m ON m.collection_id=c.id WHERE m.movie_id='ep'").fetch_one(&state.pool).await.unwrap();
         assert_eq!(collection, ("Alien Collection".into(), 99));
+        let credits: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM item_people WHERE item_id='ep'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(credits, 0);
+        sqlx::query("UPDATE media_items SET local_metadata=0 WHERE id='ep'")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(run_once(&state).await.unwrap());
+        let credits: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM item_people WHERE item_id='ep'")
+                .fetch_all(&state.pool)
+                .await
+                .unwrap();
+        assert_eq!(credits, ["Remote Actor"]);
         assert!(
             sqlx::query("PRAGMA foreign_key_check")
                 .fetch_all(&state.pool)

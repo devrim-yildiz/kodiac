@@ -428,27 +428,36 @@ async fn index(
         .runtime
         .filter(|n| n.is_finite() && *n >= 0.0)
         .map(|n| n * 60.0));
+    let mut tx = state.pool.begin().await?;
     sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,plot,year,runtime_seconds,series_name,season,episode,poster_path,container,video_codec,audio_codec,streams_json,size_bytes,modified_ns,scan_generation,local_metadata,probe_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,2) ON CONFLICT(path) DO UPDATE SET library_id=excluded.library_id,kind=excluded.kind,title=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns THEN excluded.title ELSE media_items.title END,plot=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns THEN excluded.plot ELSE media_items.plot END,year=COALESCE(excluded.year,media_items.year),runtime_seconds=excluded.runtime_seconds,series_name=excluded.series_name,season=excluded.season,episode=excluded.episode,poster_path=COALESCE(excluded.poster_path,media_items.poster_path),container=excluded.container,video_codec=excluded.video_codec,audio_codec=excluded.audio_codec,streams_json=excluded.streams_json,size_bytes=excluded.size_bytes,modified_ns=excluded.modified_ns,scan_generation=excluded.scan_generation,available=1,local_metadata=excluded.local_metadata,probe_version=2")
         .bind(uuid::Uuid::new_v4().simple().to_string()).bind(library).bind(path_text)
         .bind(if metadata.episode.is_some() || metadata.showtitle.is_some() { "episode" } else { "movie" })
         .bind(title).bind(metadata.plot).bind(metadata.year).bind(runtime).bind(metadata.showtitle).bind(metadata.season).bind(metadata.episode)
-        .bind(poster).bind(extension).bind(codec("video")).bind(codec("audio")).bind(streams.to_string()).bind(size).bind(modified).bind(generation).bind(has_nfo).execute(&state.pool).await?;
+        .bind(poster).bind(extension).bind(codec("video")).bind(codec("audio")).bind(streams.to_string()).bind(size).bind(modified).bind(generation).bind(has_nfo).execute(&mut *tx).await?;
     sqlx::query("UPDATE media_items SET backdrop_path=COALESCE(?,backdrop_path) WHERE path=?")
         .bind(backdrop)
         .bind(path_text)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     let id: String = sqlx::query_scalar("SELECT id FROM media_items WHERE path=?")
         .bind(path_text)
-        .fetch_one(&state.pool)
+        .fetch_one(&mut *tx)
         .await?;
     if !genres.is_empty() {
         sqlx::query("UPDATE movies SET genres_json=? WHERE id=?")
             .bind(serde_json::to_string(&genres)?)
             .bind(&id)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE shows SET genres_json=? WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(serde_json::to_string(&genres)?).bind(&id).execute(&state.pool).await?;
+        sqlx::query("UPDATE shows SET genres_json=? WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(serde_json::to_string(&genres)?).bind(&id).execute(&mut *tx).await?;
+    }
+    if has_nfo {
+        sqlx::query("DELETE FROM item_people WHERE item_id=? AND role IN ('Actor','Director')")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM collection_movies WHERE movie_id=? AND collection_id IN (SELECT id FROM collections WHERE id LIKE 'nfo:%')")
+            .bind(&id).execute(&mut *tx).await?;
     }
     if let Some(name) = collection {
         use sha2::{Digest, Sha256};
@@ -456,14 +465,14 @@ async fn index(
         sqlx::query("INSERT OR IGNORE INTO collections(id,title) VALUES(?,?)")
             .bind(&cid)
             .bind(name)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT OR IGNORE INTO collection_movies(collection_id,movie_id) SELECT ?,id FROM movies WHERE id=?").bind(cid).bind(&id).execute(&state.pool).await?;
+        sqlx::query("INSERT OR IGNORE INTO collection_movies(collection_id,movie_id) SELECT ?,id FROM movies WHERE id=?").bind(cid).bind(&id).execute(&mut *tx).await?;
     }
     sqlx::query("UPDATE media_items SET chapters_json=? WHERE id=?")
         .bind(chapters)
         .bind(&id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     for (name, role) in credits {
         if name.trim().is_empty() {
@@ -471,19 +480,20 @@ async fn index(
         }
         sqlx::query("INSERT OR IGNORE INTO people(name) VALUES(?)")
             .bind(&name)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT OR IGNORE INTO item_people(item_id,name,role) VALUES(?,?,?)")
             .bind(&id)
             .bind(name)
             .bind(role)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
     }
     sqlx::query("UPDATE media_items SET rating=COALESCE(?,rating) WHERE id=?")
         .bind(rating)
         .bind(&id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }

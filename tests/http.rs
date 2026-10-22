@@ -702,6 +702,99 @@ async fn changing_the_configured_root_hides_previous_library() {
 }
 
 #[tokio::test]
+async fn nfo_rescans_replace_local_links_atomically() {
+    let f = Fixture::new().await;
+    let nfo = f.state.config.media_path.join("sample.nfo");
+    for (actor, director, collection) in [("Alice", "First", "Old"), ("Bob", "Second", "New")] {
+        tokio::fs::write(&nfo, format!("<movie><title>{actor}</title><actor><name>{actor}</name></actor><director>{director}</director><set><name>{collection}</name></set></movie>")).await.unwrap();
+        scanner::scan(&f.state).await.unwrap();
+        let credits: Vec<(String, String)> =
+            sqlx::query_as("SELECT name,role FROM item_people WHERE item_id=? ORDER BY role")
+                .bind(&f.item)
+                .fetch_all(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            credits,
+            vec![
+                (actor.into(), "Actor".into()),
+                (director.into(), "Director".into())
+            ]
+        );
+        let collections: Vec<String> = sqlx::query_scalar("SELECT title FROM collections c JOIN collection_movies m ON m.collection_id=c.id WHERE m.movie_id=?")
+            .bind(&f.item).fetch_all(&f.state.pool).await.unwrap();
+        assert_eq!(collections, [collection]);
+    }
+    // A failure after deleting old links must also roll back the title and new links.
+    sqlx::query("CREATE TRIGGER reject_credit BEFORE INSERT ON item_people BEGIN SELECT RAISE(ABORT,'fixture failure'); END")
+        .execute(&f.state.pool).await.unwrap();
+    tokio::fs::write(&nfo, "<movie><title>Rejected</title><actor><name>Rejected</name></actor><set><name>Rejected</name></set></movie>").await.unwrap();
+    assert_eq!(scanner::scan(&f.state).await.unwrap().failed, 1);
+    assert_eq!(db::item(&f.state.pool, &f.item).await.unwrap().title, "Bob");
+    let credits: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM item_people WHERE item_id=? ORDER BY name")
+            .bind(&f.item)
+            .fetch_all(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(credits, ["Bob", "Second"]);
+    let collections: Vec<String> = sqlx::query_scalar("SELECT title FROM collections c JOIN collection_movies m ON m.collection_id=c.id WHERE m.movie_id=?")
+        .bind(&f.item).fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(collections, ["New"]);
+    sqlx::query("DROP TRIGGER reject_credit")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+
+    // Missing or invalid NFO is not authoritative and must preserve existing links.
+    tokio::fs::remove_file(&nfo).await.unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM item_people WHERE item_id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    tokio::fs::write(&nfo, "<movie><year>invalid</year></movie>")
+        .await
+        .unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM item_people WHERE item_id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    sqlx::query("INSERT INTO collections(id,title) VALUES('tmdb:fixture','Remote')")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO collection_movies(collection_id,movie_id) VALUES('tmdb:fixture',?)")
+        .bind(&f.item)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    tokio::fs::write(&nfo, "<movie><title>Empty credits</title></movie>")
+        .await
+        .unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM item_people WHERE item_id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let collections: Vec<String> =
+        sqlx::query_scalar("SELECT collection_id FROM collection_movies WHERE movie_id=?")
+            .bind(&f.item)
+            .fetch_all(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(collections, ["tmdb:fixture"]);
+}
+
+#[tokio::test]
 async fn beta_navigation_profiles_images_and_progress() {
     let f = Fixture::new().await;
     let streams = json!([
