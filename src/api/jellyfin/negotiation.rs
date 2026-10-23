@@ -223,7 +223,11 @@ pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
     remux &= request.enable_direct_stream != Some(false);
     transcode &= request.enable_transcoding != Some(false);
     source["SupportsDirectPlay"] = json!(direct);
-    source["SupportsDirectStream"] = json!(direct || remux);
+    source["SupportsDirectStream"] =
+        json!(request.enable_direct_stream != Some(false) && (direct || remux));
+    if source["SupportsDirectStream"] == false {
+        source["DirectStreamUrl"] = Value::Null;
+    }
     source["SupportsTranscoding"] = json!(transcode);
     source["DefaultAudioStreamIndex"] = audio["index"].clone();
     source["DefaultSubtitleStreamIndex"] = json!(request.subtitle_stream_index.unwrap_or(-1));

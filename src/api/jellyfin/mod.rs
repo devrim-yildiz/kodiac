@@ -219,6 +219,9 @@ async fn playback_info(
     request.max_streaming_bitrate = request
         .max_streaming_bitrate
         .or(query.max_streaming_bitrate);
+    request.enable_direct_play = request.enable_direct_play.or(query.enable_direct_play);
+    request.enable_direct_stream = request.enable_direct_stream.or(query.enable_direct_stream);
+    request.enable_transcoding = request.enable_transcoding.or(query.enable_transcoding);
     let mut source = negotiation::source(&item, &request)?;
     let encoded: String =
         reqwest::Url::parse_with_params("http://localhost", &[("api_key", &token.0)])

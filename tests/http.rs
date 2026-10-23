@@ -126,6 +126,66 @@ async fn value(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+async fn jellyfin_playback_enable_flags_respect_query_and_body() {
+    let f = Fixture::new().await;
+    let url = format!(
+        "/Items/{}/PlaybackInfo?EnableDirectPlay=false&EnableDirectStream=false&EnableTranscoding=false",
+        f.item
+    );
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&url)
+                .header("x-emby-token", &f.token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let info = value(response).await;
+    for flag in [
+        "SupportsDirectPlay",
+        "SupportsDirectStream",
+        "SupportsTranscoding",
+    ] {
+        assert_eq!(info["MediaSources"][0][flag], false);
+    }
+    assert_eq!(info["ErrorCode"], "NoCompatibleStream");
+    let info = value(
+        f.request("POST", &url, &[], json!({"EnableDirectPlay":true}))
+            .await,
+    )
+    .await;
+    assert_eq!(info["MediaSources"][0]["SupportsDirectPlay"], true);
+    assert_eq!(info["MediaSources"][0]["SupportsDirectStream"], false);
+    assert!(info["MediaSources"][0]["DirectStreamUrl"].is_null());
+
+    sqlx::query("UPDATE media_items SET streams_json=?,video_codec='hevc',audio_codec='aac' WHERE id=?")
+        .bind(json!([{"index":0,"codec_type":"video","codec_name":"hevc"},{"index":1,"codec_type":"audio","codec_name":"aac"}]).to_string())
+        .bind(&f.item).execute(&f.state.pool).await.unwrap();
+    let profile = json!({"TranscodingProfiles":[{"Type":"Video","Container":"mp4","Protocol":"http","VideoCodec":"h264","AudioCodec":"aac"}]});
+    let info = value(
+        f.request("POST", &url, &[], json!({"DeviceProfile":profile}))
+            .await,
+    )
+    .await;
+    assert_eq!(info["MediaSources"][0]["SupportsTranscoding"], false);
+    let info = value(
+        f.request(
+            "POST",
+            &url,
+            &[],
+            json!({"DeviceProfile":profile,"EnableTranscoding":true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(info["MediaSources"][0]["SupportsTranscoding"], true);
+}
+
+#[tokio::test]
 async fn authentication_discovery_and_jellyfin_catalog() {
     let f = Fixture::new().await;
     for path in [
