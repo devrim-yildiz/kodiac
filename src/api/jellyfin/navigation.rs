@@ -9,7 +9,7 @@ use crate::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 /// Stable identifier of the virtual Movies library view.
 pub const MOVIES: &str = "00000000000000000000000000000001";
 /// Stable identifier of the virtual Series library view.
@@ -58,24 +58,24 @@ pub struct ItemQuery {
     /// Optional account identifier; access is checked against the session.
     pub user_id: Option<String>,
 }
-async fn all(state: &AppState) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as(
-        "SELECT * FROM media_items WHERE available=1 ORDER BY series_name,season,episode,title,id",
-    )
-    .fetch_all(&state.pool)
-    .await?)
+async fn folder_key(state: &AppState, id: &str) -> Result<(String, Option<i64>)> {
+    let keys: Vec<(String, i64)> = sqlx::query_as("SELECT DISTINCT COALESCE(series_name,'Unknown series'),COALESCE(season,0) FROM media_items WHERE available=1 AND kind='episode'")
+        .fetch_all(&state.pool).await?;
+    for (name, season) in keys {
+        if series_id(&name) == id {
+            return Ok((name, None));
+        }
+        if season_id(&name, season) == id {
+            return Ok((name, Some(season)));
+        }
+    }
+    Err(AppError::NotFound)
 }
-/// Resolve a virtual folder to an available media item for artwork.
+/// Resolve a virtual folder without loading unrelated media or stream metadata.
 pub async fn representative(state: &AppState, id: &str) -> Result<MediaItem> {
-    all(state)
-        .await?
-        .into_iter()
-        .find(|i| {
-            i.series_name
-                .as_ref()
-                .is_some_and(|s| series_id(s) == id || season_id(s, i.season.unwrap_or(0)) == id)
-        })
-        .ok_or(AppError::NotFound)
+    let (name, season) = folder_key(state, id).await?;
+    sqlx::query_as("SELECT * FROM media_items WHERE available=1 AND kind='episode' AND COALESCE(series_name,'Unknown series')=? AND (? IS NULL OR COALESCE(season,0)=?) ORDER BY season,episode,title,id LIMIT 1")
+        .bind(name).bind(season).bind(season).fetch_optional(&state.pool).await?.ok_or(AppError::NotFound)
 }
 fn folder(item: &MediaItem, state: &AppState, season: bool) -> Value {
     let name = item.series_name.as_deref().unwrap_or("Unknown series");
@@ -97,7 +97,7 @@ pub async fn get_folder(state: &AppState, id: &str) -> Result<Value> {
     Ok(folder(
         &item,
         state,
-        series_id(item.series_name.as_deref().unwrap_or("")) != id,
+        series_id(item.series_name.as_deref().unwrap_or("Unknown series")) != id,
     ))
 }
 /// List virtual folders or source items using the supported Jellyfin navigation filters.
@@ -109,139 +109,176 @@ pub async fn list(
     if q.user_id.as_ref().is_some_and(|id| id != &user.id) {
         return Err(AppError::NotFound);
     }
-    let rows = all(state).await?;
-    let progress: Vec<(String, i64, bool)> = sqlx::query_as(
-        "SELECT h.media_item_id,h.position_ticks,h.completed FROM playback_history h JOIN profiles p ON p.id=h.profile_id WHERE p.user_id=? AND p.is_default=1",
-    )
-    .bind(&user.id)
+    let parent = q.season_id.as_deref().or(q.parent_id.as_deref());
+    let mut kind = None;
+    let mut library = None;
+    let mut name = None;
+    let mut parent_season = None;
+    let mut parent_series = false;
+    if let Some(id) = parent {
+        match id {
+            MOVIES => kind = Some("movie"),
+            SERIES => kind = Some("episode"),
+            _ => {
+                if sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM libraries WHERE id=?)",
+                )
+                .bind(id)
+                .fetch_one(&state.pool)
+                .await?
+                {
+                    library = Some(id);
+                } else {
+                    let (series, season) = folder_key(state, id).await?;
+                    name = Some(series);
+                    parent_season = season;
+                    parent_series = season.is_none();
+                    kind = Some("episode");
+                }
+            }
+        }
+    }
+    let types: Vec<_> = q
+        .include_item_types
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let defaults = types.is_empty();
+    let recursive = q.recursive == Some(true);
+    let movies = types.contains(&"Movie") || defaults;
+    let episodes = types.contains(&"Episode")
+        || (defaults && ((parent != Some(SERIES) && !parent_series) || recursive));
+    let series = types.contains(&"Series") || (defaults && parent == Some(SERIES) && !recursive);
+    let seasons = types.contains(&"Season") || (defaults && parent_series && !recursive);
+    let mut entries = Vec::new();
+    if movies || episodes {
+        let predicate = match (movies, episodes) {
+            (true, true) => "1",
+            (true, false) => "kind='movie'",
+            _ => "kind='episode'",
+        };
+        entries.push(format!("SELECT 'file:'||id AS entry_id,id AS media_id,CASE WHEN kind='movie' THEN 'Movie' ELSE 'Episode' END AS item_type,title AS name,year AS production_year,episode AS index_number,season AS parent_index_number,runtime_seconds AS runtime FROM filtered WHERE {predicate}"));
+    }
+    if series {
+        entries.push("SELECT 'series:'||COALESCE(series_name,'Unknown series'),id,'Series',COALESCE(series_name,'Unknown series'),NULL,NULL,NULL,NULL FROM (SELECT *,row_number() OVER(PARTITION BY COALESCE(series_name,'Unknown series') ORDER BY season,episode,title,id) AS rank FROM filtered WHERE kind='episode') WHERE rank=1".into());
+    }
+    if seasons {
+        entries.push("SELECT 'season:'||COALESCE(series_name,'Unknown series')||':'||COALESCE(season,0),id,'Season','Season '||COALESCE(season,0),NULL,COALESCE(season,0),NULL,NULL FROM (SELECT *,row_number() OVER(PARTITION BY COALESCE(series_name,'Unknown series'),COALESCE(season,0) ORDER BY season,episode,title,id) AS rank FROM filtered WHERE kind='episode') WHERE rank=1".into());
+    }
+    let offset = q.start_index.unwrap_or(0).max(0);
+    if entries.is_empty() {
+        return Ok(super::dto::ItemsResponse {
+            items: vec![],
+            total_record_count: 0,
+            start_index: offset,
+        });
+    }
+    let cte = format!(
+        "WITH filtered AS (SELECT id,kind,title,year,runtime_seconds,series_name,season,episode FROM media_items WHERE available=1 AND (?1 IS NULL OR kind=?1) AND (?2 IS NULL OR library_id=?2) AND (?3 IS NULL OR COALESCE(series_name,'Unknown series')=?3) AND (?4 IS NULL OR COALESCE(season,0)=?4) AND (?5 IS NULL OR season=?5)),entries(entry_id,media_id,item_type,name,production_year,index_number,parent_index_number,runtime) AS ({})",
+        entries.join(" UNION ALL ")
+    );
+    // Search only compact names in Rust to preserve Unicode matching; page full records in SQLite.
+    let search_ids = if let Some(search) = q.search_term.as_ref().filter(|s| !s.is_empty()) {
+        let names: Vec<(String, String)> =
+            sqlx::query_as(&format!("{cte} SELECT entry_id,name FROM entries"))
+                .bind(kind)
+                .bind(library)
+                .bind(name.as_deref())
+                .bind(parent_season)
+                .bind(q.season)
+                .fetch_all(&state.pool)
+                .await?;
+        let search = search.to_lowercase();
+        let ids: Vec<_> = names
+            .into_iter()
+            .filter(|(_, name)| name.to_lowercase().contains(&search))
+            .map(|(id, _)| id)
+            .collect();
+        Some(serde_json::to_string(&ids).map_err(|e| AppError::Internal(e.into()))?)
+    } else {
+        None
+    };
+    let filter = "FROM entries WHERE (?6 IS NULL OR entry_id IN(SELECT value FROM json_each(?6)))";
+    let total: i64 = sqlx::query_scalar(&format!("{cte} SELECT count(*) {filter}"))
+        .bind(kind)
+        .bind(library)
+        .bind(name.as_deref())
+        .bind(parent_season)
+        .bind(q.season)
+        .bind(search_ids.as_deref())
+        .fetch_one(&state.pool)
+        .await?;
+    let direction = if q.sort_order.as_deref() == Some("Descending") {
+        "DESC"
+    } else {
+        "ASC"
+    };
+    let order = q
+        .sort_by
+        .as_deref()
+        .unwrap_or("SortName")
+        .split(',')
+        .map(|field| {
+            let column = match field {
+                "ProductionYear" | "PremiereDate" => "production_year",
+                "IndexNumber" => "index_number",
+                "ParentIndexNumber" => "parent_index_number",
+                "Runtime" => "runtime",
+                _ => "name COLLATE jellyfin_name",
+            };
+            format!("{column} {direction}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let page: Vec<(String, String)> = sqlx::query_as(&format!(
+        "{cte} SELECT media_id,item_type {filter} ORDER BY {order},entry_id LIMIT ?7 OFFSET ?8"
+    ))
+    .bind(kind)
+    .bind(library)
+    .bind(name.as_deref())
+    .bind(parent_season)
+    .bind(q.season)
+    .bind(search_ids.as_deref())
+    .bind(q.limit.unwrap_or(100).clamp(0, 1000))
+    .bind(offset)
     .fetch_all(&state.pool)
     .await?;
-    let positions: HashMap<_, _> = progress
+    let ids = serde_json::to_string(&page.iter().map(|(id, _)| id).collect::<Vec<_>>())
+        .map_err(|e| AppError::Internal(e.into()))?;
+    let rows: Vec<MediaItem> = sqlx::query_as(
+        "SELECT * FROM media_items WHERE available=1 AND id IN(SELECT value FROM json_each(?))",
+    )
+    .bind(&ids)
+    .fetch_all(&state.pool)
+    .await?;
+    let rows: HashMap<_, _> = rows
+        .into_iter()
+        .map(|item| (item.id.clone(), item))
+        .collect();
+    let progress: Vec<(String,i64,bool)> = sqlx::query_as("SELECT h.media_item_id,h.position_ticks,h.completed FROM playback_history h JOIN profiles p ON p.id=h.profile_id WHERE p.user_id=? AND p.is_default=1 AND h.media_item_id IN(SELECT value FROM json_each(?))")
+        .bind(&user.id).bind(&ids).fetch_all(&state.pool).await?;
+    let progress: HashMap<_, _> = progress
         .into_iter()
         .map(|(id, position, completed)| (id, (position, completed)))
         .collect();
-    let parent = q.season_id.as_deref().or(q.parent_id.as_deref());
-    let mut series = BTreeMap::new();
-    let mut seasons = BTreeMap::new();
-    let mut result = Vec::new();
-    let include = q.include_item_types.as_deref().unwrap_or("");
-    let types: Vec<_> = include.split(',').filter(|s| !s.is_empty()).collect();
-    let wants = |kind: &str| types.contains(&kind);
-    let parent_series = parent.is_some_and(|p| {
-        rows.iter()
-            .any(|i| i.series_name.as_ref().is_some_and(|s| series_id(s) == p))
-    });
-    let parent_season = parent.is_some_and(|p| {
-        rows.iter().any(|i| {
-            i.series_name
-                .as_ref()
-                .is_some_and(|s| season_id(s, i.season.unwrap_or(0)) == p)
+    let items = page
+        .into_iter()
+        .filter_map(|(id, ty)| {
+            let item = rows.get(&id)?;
+            Some(match ty.as_str() {
+                "Series" => folder(item, state, false),
+                "Season" => folder(item, state, true),
+                _ => {
+                    let (position, completed) = progress.get(&id).copied().unwrap_or_default();
+                    super::dto::item(item, &state.server_id, position, completed)
+                }
+            })
         })
-    });
-    if let Some(p) = parent {
-        let library: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM libraries WHERE id=?")
-            .bind(p)
-            .fetch_one(&state.pool)
-            .await?;
-        if p != MOVIES && p != SERIES && !parent_series && !parent_season && library == 0 {
-            return Err(AppError::NotFound);
-        }
-    }
-    for item in &rows {
-        let name = item.series_name.as_deref().unwrap_or("Unknown series");
-        let sid = series_id(name);
-        let season = season_id(name, item.season.unwrap_or(0));
-        let in_parent = match parent {
-            Some(MOVIES) => item.kind == "movie",
-            Some(SERIES) => item.kind == "episode",
-            Some(p) if parent_series => sid == p,
-            Some(p) if parent_season => season == p,
-            _ => true,
-        };
-        if !in_parent || q.season.is_some_and(|n| item.season != Some(n)) {
-            continue;
-        }
-        if item.kind == "episode" {
-            if wants("Series")
-                || (types.is_empty() && parent == Some(SERIES) && q.recursive != Some(true))
-            {
-                series
-                    .entry(sid)
-                    .or_insert_with(|| folder(item, state, false));
-            }
-            if wants("Season") || (types.is_empty() && parent_series && q.recursive != Some(true)) {
-                seasons
-                    .entry(season)
-                    .or_insert_with(|| folder(item, state, true));
-            }
-        }
-        let ty = if item.kind == "movie" {
-            "Movie"
-        } else {
-            "Episode"
-        };
-        if wants(ty)
-            || (types.is_empty()
-                && (item.kind == "movie"
-                    || parent != Some(SERIES) && !parent_series
-                    || q.recursive == Some(true)))
-        {
-            let (position, completed) = positions.get(&item.id).copied().unwrap_or_default();
-            result.push(super::dto::item(
-                item,
-                &state.server_id,
-                position,
-                completed,
-            ));
-        }
-    }
-    result.extend(series.into_values());
-    result.extend(seasons.into_values());
-    if let Some(search) = q.search_term {
-        let search = search.to_lowercase();
-        result.retain(|i| {
-            i["Name"]
-                .as_str()
-                .unwrap_or("")
-                .to_lowercase()
-                .contains(&search)
-        });
-    }
-    let sort = q.sort_by.as_deref().unwrap_or("SortName");
-    for field in sort.split(',').rev() {
-        let key = match field {
-            "SortName" | "Name" => "Name",
-            "ProductionYear" | "PremiereDate" => "ProductionYear",
-            "IndexNumber" => "IndexNumber",
-            "ParentIndexNumber" => "ParentIndexNumber",
-            "Runtime" => "RunTimeTicks",
-            _ => "Name",
-        };
-        result.sort_by(|a, b| {
-            let ordering = if key == "Name" {
-                a[key]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .cmp(&b[key].as_str().unwrap_or("").to_lowercase())
-            } else {
-                a[key].as_i64().cmp(&b[key].as_i64())
-            };
-            if q.sort_order.as_deref() == Some("Descending") {
-                ordering.reverse()
-            } else {
-                ordering
-            }
-        });
-    }
-    let total = result.len() as i64;
-    let offset = q.start_index.unwrap_or(0).max(0);
+        .collect();
     Ok(super::dto::ItemsResponse {
-        items: result
-            .into_iter()
-            .skip(offset as usize)
-            .take(q.limit.unwrap_or(100).clamp(0, 1000) as usize)
-            .collect(),
+        items,
         total_record_count: total,
         start_index: offset,
     })

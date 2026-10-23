@@ -249,6 +249,178 @@ async fn jellyfin_user_policy_reflects_current_persisted_role() {
 }
 
 #[tokio::test]
+async fn jellyfin_pages_only_load_selected_media_and_preserve_navigation() {
+    let f = Fixture::new().await;
+    let library: String = sqlx::query_scalar("SELECT library_id FROM media_items WHERE id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let mut tx = f.state.pool.begin().await.unwrap();
+    for n in 0..200 {
+        sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,container,size_bytes,modified_ns,scan_generation) VALUES(?,?,?,'movie',?,'mp4',1,'1','test')")
+            .bind(format!("bulk{n:04}")).bind(&library).bind(format!("/fixture/{n}.mp4")).bind(format!("Film{n:04}")).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("UPDATE media_items SET streams_json=CAST(X'80' AS TEXT) WHERE id='bulk0199'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for (id, name, season, episode) in [
+        ("ep1", "Ähre", 1, 1),
+        ("ep2", "Ähre", 2, 1),
+        ("ep3", "Andere", 1, 1),
+        ("ep4", "äpfel", 1, 1),
+        ("ep5", "Äther", 1, 1),
+    ] {
+        sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,series_name,season,episode,container,size_bytes,modified_ns,scan_generation) VALUES(?,?,?,'episode',?,?,?,?, 'mkv',1,'1','test')")
+            .bind(id).bind(&library).bind(format!("/fixture/{id}.mkv")).bind(id).bind(name).bind(season).bind(episode).execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    assert!(db::item(&f.state.pool, "bulk0199").await.is_err());
+    let response = f
+        .request(
+            "GET",
+            "/Items?IncludeItemTypes=Movie&Limit=2&StartIndex=3&SortBy=Name",
+            &[],
+            Value::Null,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = value(response).await;
+    assert_eq!(page["TotalRecordCount"], 201);
+    assert_eq!(page["StartIndex"], 3);
+    assert_eq!(page["Items"][0]["Id"], "bulk0003");
+    assert_eq!(page["Items"][1]["Id"], "bulk0004");
+    let page = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Movie&SearchTerm=Film0003&Limit=1",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page["TotalRecordCount"], 1);
+    assert_eq!(page["Items"][0]["Id"], "bulk0003");
+    let page = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Movie&Limit=0",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page["TotalRecordCount"], 201);
+    assert!(page["Items"].as_array().unwrap().is_empty());
+    let page = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Series&SearchTerm=%C3%A4H&SortOrder=Descending",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page["TotalRecordCount"], 1);
+    let sid = kodiac::api::jellyfin::navigation::series_id("Ähre");
+    let ordered = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Series&SortBy=Name",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    let names: Vec<_> = ordered["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["Name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Andere", "Ähre", "äpfel", "Äther"]);
+    assert_eq!(page["Items"][0]["Id"], sid);
+    assert_eq!(
+        kodiac::api::jellyfin::navigation::representative(&f.state, &sid)
+            .await
+            .unwrap()
+            .id,
+        "ep1"
+    );
+    let seasons = value(
+        f.request(
+            "GET",
+            &format!("/Shows/{sid}/Seasons?SortBy=IndexNumber&SortOrder=Descending&Limit=1"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(seasons["TotalRecordCount"], 2);
+    assert_eq!(seasons["Items"][0]["IndexNumber"], 2);
+    let episodes = value(
+        f.request(
+            "GET",
+            &format!("/Shows/{sid}/Episodes?SortBy=ParentIndexNumber,IndexNumber"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(episodes["TotalRecordCount"], 2);
+    assert_eq!(episodes["Items"][0]["Id"], "ep1");
+    assert_eq!(episodes["Items"][1]["Id"], "ep2");
+    let mixed = value(
+        f.request(
+            "GET",
+            &format!("/Items?ParentId={sid}&IncludeItemTypes=Series,Season,Episode&Limit=1"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(mixed["TotalRecordCount"], 5);
+    assert_eq!(mixed["Items"].as_array().unwrap().len(), 1);
+    sqlx::query("INSERT INTO libraries(id,name,path) VALUES('other-library','Other','/other')")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,container,size_bytes,modified_ns,scan_generation) VALUES('other-movie','other-library','/other/movie.mp4','movie','Other','mp4',1,'1','test')").execute(&f.state.pool).await.unwrap();
+    let scoped = value(
+        f.request(
+            "GET",
+            "/Items?ParentId=other-library&IncludeItemTypes=Movie",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(scoped["TotalRecordCount"], 1);
+    assert_eq!(scoped["Items"][0]["Id"], "other-movie");
+    assert_eq!(
+        f.request("GET", "/Items?ParentId=missing", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        f.request("GET", "/Items?UserId=someone-else", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn authentication_discovery_and_jellyfin_catalog() {
     let f = Fixture::new().await;
     for path in [
