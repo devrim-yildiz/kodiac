@@ -189,7 +189,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
                         sqlx::query("UPDATE shows SET poster_path=CASE WHEN replace(poster_path,char(92),'/') LIKE '%/extracted/%' THEN COALESCE(?,poster_path) ELSE poster_path END,backdrop_path=CASE WHEN replace(backdrop_path,char(92),'/') LIKE '%/extracted/%' THEN COALESCE(?,backdrop_path) ELSE backdrop_path END WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(&data.poster).bind(&data.backdrop).bind(&id).execute(&mut *tx).await?;
 
                         sqlx::query(
-                            "UPDATE episodes SET still_path=COALESCE(still_path,?),tmdb_id=COALESCE(?,tmdb_id) WHERE id=?",
+                            "UPDATE episodes SET still_path=CASE WHEN still_path IS NULL OR replace(still_path,char(92),'/') LIKE '%/extracted/%' THEN COALESCE(?,still_path) ELSE still_path END,tmdb_id=COALESCE(?,tmdb_id) WHERE id=?",
                         )
                         .bind(&data.still)
                         .bind(data.episode_tmdb_id)
@@ -527,11 +527,26 @@ mod tests {
                 .execute(&state.pool)
                 .await
                 .unwrap();
+            sqlx::query("UPDATE episodes SET still_path=?")
+                .bind(path)
+                .execute(&state.pool)
+                .await
+                .unwrap();
             sqlx::query("UPDATE tmdb_jobs SET next_attempt_at=0")
                 .execute(&state.pool)
                 .await
                 .unwrap();
             assert!(run_once(&state).await.unwrap());
+            let still: String = sqlx::query_scalar("SELECT still_path FROM episodes WHERE id='ep'")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+            if path == "/library/poster.jpg" {
+                assert_eq!(still, path);
+            } else {
+                assert_ne!(still, path);
+                assert!(std::path::Path::new(&still).is_file());
+            }
             for table in ["media_items", "shows"] {
                 let (poster, backdrop): (String, String) =
                     sqlx::query_as(&format!("SELECT poster_path,backdrop_path FROM {table}"))
