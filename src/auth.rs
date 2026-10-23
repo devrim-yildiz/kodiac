@@ -32,6 +32,8 @@ pub struct User {
     pub id: String,
     /// Account username.
     pub username: String,
+    /// Current persisted administrator flag, refreshed when authenticating each request.
+    pub is_admin: bool,
 }
 fn hash_token(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
@@ -114,8 +116,8 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
     if credentials.username.len() > 256 || credentials.password.len() > 1024 {
         return Err(AppError::Unauthorized);
     }
-    let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT id, username, password_hash FROM users WHERE username=?")
+    let row: Option<(String, String, String, bool)> =
+        sqlx::query_as("SELECT id, username, password_hash,is_admin FROM users WHERE username=?")
             .bind(credentials.username)
             .fetch_optional(&state.pool)
             .await?;
@@ -138,7 +140,7 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
     })
     .await
     .map_err(|e| AppError::Internal(e.into()))?;
-    let (id, username, _) = row.filter(|_| valid).ok_or(AppError::Unauthorized)?;
+    let (id, username, _, is_admin) = row.filter(|_| valid).ok_or(AppError::Unauthorized)?;
     let token = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
@@ -154,7 +156,14 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
     .bind(&id)
     .execute(&state.pool)
     .await?;
-    Ok((User { id, username }, token))
+    Ok((
+        User {
+            id,
+            username,
+            is_admin,
+        },
+        token,
+    ))
 }
 /// Format a strict HttpOnly session cookie with lifetime in seconds and optional Secure flag.
 pub fn cookie(state: &AppState, token: &str, age: u64) -> String {
@@ -234,10 +243,14 @@ pub async fn require_auth(
     if token.len() > 256 {
         return Err(AppError::Unauthorized);
     }
-    let row: Option<(String, String)> = sqlx::query_as("SELECT u.id,u.username FROM users u JOIN auth_tokens t ON t.user_id=u.id WHERE t.token_hash=? AND t.expires_at>unixepoch()")
+    let row: Option<(String, String, bool)> = sqlx::query_as("SELECT u.id,u.username,u.is_admin FROM users u JOIN auth_tokens t ON t.user_id=u.id WHERE t.token_hash=? AND t.expires_at>unixepoch()")
         .bind(hash_token(&token)).fetch_optional(&state.pool).await?;
-    let (id, username) = row.ok_or(AppError::Unauthorized)?;
-    req.extensions_mut().insert(User { id, username });
+    let (id, username, is_admin) = row.ok_or(AppError::Unauthorized)?;
+    req.extensions_mut().insert(User {
+        id,
+        username,
+        is_admin,
+    });
     req.extensions_mut().insert(TokenHash(hash_token(&token)));
     req.extensions_mut().insert(MediaToken(token));
     Ok(next.run(req).await)

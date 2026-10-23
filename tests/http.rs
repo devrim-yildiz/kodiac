@@ -215,6 +215,40 @@ async fn jellyfin_watched_state_uses_only_the_default_profile() {
 }
 
 #[tokio::test]
+async fn jellyfin_user_policy_reflects_current_persisted_role() {
+    let f = Fixture::new().await;
+    for is_admin in [true, false] {
+        sqlx::query("UPDATE users SET is_admin=? WHERE id=?")
+            .bind(is_admin)
+            .bind(&f.user)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        for path in ["/Users/Me".to_owned(), format!("/Users/{}", f.user)] {
+            let user = value(f.request("GET", &path, &[], Value::Null).await).await;
+            assert_eq!(user["Policy"]["IsAdministrator"], is_admin);
+        }
+        let login = value(
+            f.request(
+                "POST",
+                "/Users/AuthenticateByName",
+                &[],
+                json!({"Username":"admin","Pw":"a-test-password-only"}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(login["User"]["Policy"]["IsAdministrator"], is_admin);
+    }
+    assert_eq!(
+        f.request("POST", "/api/v1/scan", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn authentication_discovery_and_jellyfin_catalog() {
     let f = Fixture::new().await;
     for path in [

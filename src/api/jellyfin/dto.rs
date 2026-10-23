@@ -19,7 +19,7 @@ pub struct ItemsResponse {
 pub fn user(user: &User, server: &str) -> Value {
     json!({"Id":user.id,"Name":user.username,"ServerId":server,"HasPassword":true,"HasConfiguredPassword":true,"HasConfiguredEasyPassword":false,
         "Configuration":{"AudioLanguagePreference":"","PlayDefaultAudioTrack":true,"SubtitleMode":"Default","EnableNextEpisodeAutoPlay":true},
-        "Policy":{"IsAdministrator":true,"IsHidden":false,"IsDisabled":false,"EnableMediaPlayback":true,"EnableVideoPlaybackTranscoding":true,"EnableAudioPlaybackTranscoding":true,"EnablePlaybackRemuxing":true,"EnableAllFolders":true,"EnableContentDownloading":true,"EnableSyncTranscoding":false}})
+        "Policy":{"IsAdministrator":user.is_admin,"IsHidden":false,"IsDisabled":false,"EnableMediaPlayback":true,"EnableVideoPlaybackTranscoding":true,"EnableAudioPlaybackTranscoding":true,"EnablePlaybackRemuxing":true,"EnableAllFolders":true,"EnableContentDownloading":true,"EnableSyncTranscoding":false}})
 }
 fn video_range(stream: &Value) -> &'static str {
     match stream["color_transfer"].as_str() {
@@ -90,6 +90,7 @@ mod tests {
             &User {
                 id: "user".into(),
                 username: "admin".into(),
+                is_admin: true,
             },
             "server",
         );
