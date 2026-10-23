@@ -174,17 +174,19 @@ async fn get_item(state: &AppState, user: &User, id: &str) -> Result<Json<Value>
         Err(AppError::NotFound) => return navigation::get_folder(state, id).await.map(Json),
         Err(e) => return Err(e),
     };
-    let position: Option<i64> = sqlx::query_scalar(
-        "SELECT position_ticks FROM playback_sessions WHERE user_id=? AND media_item_id=?",
+    let progress: Option<(i64, bool)> = sqlx::query_as(
+        "SELECT h.position_ticks,h.completed FROM playback_history h JOIN profiles p ON p.id=h.profile_id WHERE p.user_id=? AND p.is_default=1 AND h.media_item_id=?",
     )
     .bind(&user.id)
     .bind(id)
     .fetch_optional(&state.pool)
     .await?;
+    let (position, completed) = progress.unwrap_or_default();
     Ok(Json(dto::item(
         &item,
         &state.server_id,
-        position.unwrap_or(0),
+        position,
+        completed,
     )))
 }
 async fn item(

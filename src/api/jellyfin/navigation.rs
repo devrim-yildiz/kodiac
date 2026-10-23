@@ -110,13 +110,16 @@ pub async fn list(
         return Err(AppError::NotFound);
     }
     let rows = all(state).await?;
-    let progress: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT media_item_id,position_ticks FROM playback_sessions WHERE user_id=?",
+    let progress: Vec<(String, i64, bool)> = sqlx::query_as(
+        "SELECT h.media_item_id,h.position_ticks,h.completed FROM playback_history h JOIN profiles p ON p.id=h.profile_id WHERE p.user_id=? AND p.is_default=1",
     )
     .bind(&user.id)
     .fetch_all(&state.pool)
     .await?;
-    let positions: HashMap<_, _> = progress.into_iter().collect();
+    let positions: HashMap<_, _> = progress
+        .into_iter()
+        .map(|(id, position, completed)| (id, (position, completed)))
+        .collect();
     let parent = q.season_id.as_deref().or(q.parent_id.as_deref());
     let mut series = BTreeMap::new();
     let mut seasons = BTreeMap::new();
@@ -183,10 +186,12 @@ pub async fn list(
                     || parent != Some(SERIES) && !parent_series
                     || q.recursive == Some(true)))
         {
+            let (position, completed) = positions.get(&item.id).copied().unwrap_or_default();
             result.push(super::dto::item(
                 item,
                 &state.server_id,
-                *positions.get(&item.id).unwrap_or(&0),
+                position,
+                completed,
             ));
         }
     }

@@ -186,6 +186,35 @@ async fn jellyfin_playback_enable_flags_respect_query_and_body() {
 }
 
 #[tokio::test]
+async fn jellyfin_watched_state_uses_only_the_default_profile() {
+    let f = Fixture::new().await;
+    sqlx::query("INSERT INTO profiles(id,user_id,name) VALUES('other',?,'Other')")
+        .bind(&f.user)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    for (profile, completed, expected) in [
+        ("other", true, false),
+        (f.user.as_str(), true, true),
+        (f.user.as_str(), false, false),
+    ] {
+        assert_eq!(f.request("POST","/api/v1/playback",&[],json!({"item_id":f.item,"profile_id":profile,"position_ticks":500,"completed":completed})).await.status(),StatusCode::NO_CONTENT);
+        for path in [
+            format!("/Items/{}", f.item),
+            format!("/Users/{}/Items/{}", f.user, f.item),
+        ] {
+            let item = value(f.request("GET", &path, &[], Value::Null).await).await;
+            assert_eq!(item["UserData"]["Played"], expected);
+            assert_eq!(item["UserData"]["PlayCount"], i32::from(expected));
+        }
+        for path in ["/Items".to_owned(), format!("/Users/{}/Items", f.user)] {
+            let page = value(f.request("GET", &path, &[], Value::Null).await).await;
+            assert_eq!(page["Items"][0]["UserData"]["Played"], expected);
+        }
+    }
+}
+
+#[tokio::test]
 async fn authentication_discovery_and_jellyfin_catalog() {
     let f = Fixture::new().await;
     for path in [
