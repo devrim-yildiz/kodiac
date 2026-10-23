@@ -99,6 +99,28 @@ fn conditions(profile: &Value, video: &Value, audio: &Value, bitrate: Option<u64
         })
     })
 }
+fn profiles_match(
+    profile: &Value,
+    video: &Value,
+    audio: &Value,
+    bitrate: Option<u64>,
+    container: &str,
+) -> bool {
+    profile["CodecProfiles"].as_array().is_none_or(|ps| {
+        ps.iter().all(|p| {
+            let codec = if p["Type"] == "Video" {
+                &video["codec_name"]
+            } else {
+                &audio["codec_name"]
+            };
+            !accepts(&p["Codec"], codec.as_str().unwrap_or(""))
+                || conditions(p, video, audio, bitrate)
+        })
+    }) && profile["ContainerProfiles"].as_array().is_none_or(|ps| {
+        ps.iter()
+            .all(|p| !accepts(&p["Container"], container) || conditions(p, video, audio, bitrate))
+    })
+}
 /// Evaluate a PlaybackInfo profile and build a media source with supported delivery URLs.
 ///
 /// # Errors
@@ -145,20 +167,8 @@ pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
             .max_streaming_bitrate
             .or(profile["MaxStreamingBitrate"].as_u64());
         let within = limit.is_none_or(|n| bitrate.is_some_and(|b| b <= n));
-        let codec_ok = profile["CodecProfiles"].as_array().is_none_or(|ps| {
-            ps.iter().all(|p| {
-                let codec = if p["Type"] == "Video" { vc } else { ac };
-                !accepts(&p["Codec"], codec) || conditions(p, &video, audio, bitrate)
-            })
-        });
-        let container_ok = profile["ContainerProfiles"].as_array().is_none_or(|ps| {
-            ps.iter().all(|p| {
-                !accepts(&p["Container"], &item.container) || conditions(p, &video, audio, bitrate)
-            })
-        });
         direct = within
-            && codec_ok
-            && container_ok
+            && profiles_match(profile, &video, audio, bitrate, &item.container)
             && profile["DirectPlayProfiles"].as_array().is_some_and(|ps| {
                 ps.iter().any(|p| {
                     p["Type"] == "Video"
@@ -186,7 +196,7 @@ pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
             })
             .unwrap_or_default();
         remux = within
-            && codec_ok
+            && profiles_match(profile, &video, audio, bitrate, "mp4")
             && matches!(vc, "h264" | "hevc" | "av1")
             && matches!(ac, "" | "aac" | "mp3" | "ac3" | "eac3" | "alac")
             && targets.iter().any(|p| {
@@ -194,6 +204,17 @@ pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
             });
         // The initial beta encoder targets 4Mbps video + 192kbps audio and does not
         // claim to satisfy lower bitrate limits or unsupported output conditions.
+        let output_video = json!({"codec_name":"h264","width":video["width"],"height":video["height"],"pix_fmt":"yuv420p","profile":"High","bit_rate":"4000000"});
+        let output_audio = json!({"codec_name":"aac","channels":2,"bit_rate":"192000"});
+        let output_matches = |container: &str, target: &Value| {
+            profiles_match(
+                profile,
+                &output_video,
+                &output_audio,
+                Some(4_192_000),
+                container,
+            ) && conditions(target, &output_video, &output_audio, Some(4_192_000))
+        };
         hls = item
             .runtime_seconds
             .is_some_and(|n| n > 0.0 && n <= 604800.0)
@@ -206,12 +227,18 @@ pub fn source(item: &MediaItem, request: &PlaybackRequest) -> Result<Value> {
                         && accepts(&p["Container"], "ts")
                         && accepts(&p["VideoCodec"], "h264")
                         && accepts(&p["AudioCodec"], "aac")
+                        && p["Context"]
+                            .as_str()
+                            .is_none_or(|s| s.eq_ignore_ascii_case("Streaming"))
+                        && output_matches("ts", p)
                 })
             });
         transcode = limit.is_none_or(|n| n >= 4_192_000)
             && (hls
                 || targets.iter().any(|p| {
-                    accepts(&p["VideoCodec"], "h264") && accepts(&p["AudioCodec"], "aac")
+                    accepts(&p["VideoCodec"], "h264")
+                        && accepts(&p["AudioCodec"], "aac")
+                        && output_matches("mp4", p)
                 }))
             && !vc.is_empty();
     } else {
@@ -280,5 +307,43 @@ mod tests {
         ));
         assert!(accepts(&json!("h264,hevc"), "hevc"));
         assert!(!accepts(&json!("h264"), "hevc"));
+    }
+    #[test]
+    fn conversion_checks_output_constraints_for_http_and_hls() {
+        let item = MediaItem {
+            id:"item".into(),library_id:"lib".into(),path:"/movie.mkv".into(),kind:"movie".into(),
+            title:"Movie".into(),plot:String::new(),year:None,runtime_seconds:Some(120.0),series_name:None,
+            season:None,episode:None,poster_path:None,backdrop_path:None,container:"mkv".into(),
+            video_codec:Some("hevc".into()),audio_codec:Some("aac".into()),size_bytes:1000,
+            streams_json:json!([{"index":0,"codec_type":"video","codec_name":"hevc","width":3840,"height":2160},{"index":1,"codec_type":"audio","codec_name":"aac","channels":6}]).to_string(),
+        };
+        for (container, protocol) in [("mp4", "http"), ("ts", "hls")] {
+            for (property, expected, accepted) in [
+                ("Width", "1920", false),
+                ("Width", "4096", true),
+                ("AudioChannels", "1", false),
+                ("AudioChannels", "2", true),
+                ("Unknown", "1", false),
+                ("VideoLevel", "51", false),
+            ] {
+                let request:PlaybackRequest = serde_json::from_value(json!({"DeviceProfile":{
+                    "TranscodingProfiles":[{"Type":"Video","Container":container,"Protocol":protocol,"VideoCodec":"h264","AudioCodec":"aac"}],
+                    "CodecProfiles":[{"Type":if property=="AudioChannels" {"Audio"} else {"Video"},"Codec":if property=="AudioChannels" {"aac"} else {"h264"},"Conditions":[{"Property":property,"Condition":"LessThanEqual","Value":expected,"IsRequired":true}]}]
+                }})).unwrap();
+                assert_eq!(
+                    source(&item, &request).unwrap()["SupportsTranscoding"],
+                    accepted,
+                    "{protocol}: {property} <= {expected}"
+                );
+            }
+            let request:PlaybackRequest = serde_json::from_value(json!({"DeviceProfile":{
+                "TranscodingProfiles":[{"Type":"Video","Container":container,"Protocol":protocol,"VideoCodec":"h264","AudioCodec":"aac"}],
+                "ContainerProfiles":[{"Container":container,"Conditions":[{"Property":"Height","Condition":"LessThanEqual","Value":"1080","IsRequired":true}]}]
+            }})).unwrap();
+            assert_eq!(
+                source(&item, &request).unwrap()["SupportsTranscoding"],
+                false
+            );
+        }
     }
 }
