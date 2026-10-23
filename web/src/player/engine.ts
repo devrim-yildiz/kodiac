@@ -156,6 +156,27 @@ export class PlaybackEngine {
       window.dispatchEvent(new Event("history-changed"));
     });
     on("error", () => {
+      if (this.disposed) return;
+      // Retry format failures once per delivery mode; network errors need a real error.
+      if ([3, 4].includes(video.error?.code ?? 0)) {
+        const audio =
+          this.info.MediaStreams.filter((s) => s.Type === "Audio")[
+            this.audioIndex ?? 0
+          ]?.Codec ||
+          this.item.audio_codec ||
+          undefined;
+        const next =
+          this.mode === "direct" && canBuffer("remux", this.item, audio)
+            ? "remux"
+            : this.mode !== "transcode" &&
+                canBuffer("transcode", this.item, audio)
+              ? "transcode"
+              : null;
+        if (next) {
+          usePlayer.getState().patch({ mode: next, error: "" });
+          return;
+        }
+      }
       if (!this.disposed)
         usePlayer.getState().patch({
           loading: false,
