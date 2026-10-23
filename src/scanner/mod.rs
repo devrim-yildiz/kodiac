@@ -38,6 +38,21 @@ pub struct ScanReport {
 #[error("scan already running")]
 pub struct ScanBusy;
 
+struct ScanStatusGuard<'a>(&'a std::sync::Mutex<Value>);
+impl Drop for ScanStatusGuard<'_> {
+    fn drop(&mut self) {
+        let mut status = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if status["running"] == true {
+            status["running"] = false.into();
+            status["complete"] = false.into();
+            status["phase"] = "Scan cancelled; previous catalog retained".into();
+        }
+    }
+}
+
 async fn bounded_read(path: &Path, maximum: u64) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     tokio::fs::File::open(path)
@@ -110,13 +125,14 @@ pub(crate) async fn scan_locked(
     state: &AppState,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 ) -> anyhow::Result<ScanReport> {
-    *state.scan_status.lock().await =
+    *state.scan_status.lock().unwrap() =
         serde_json::json!({"running":true,"indexed":0,"failed":0,"phase":"Indexing library"});
+    let _status_guard = ScanStatusGuard(&state.scan_status);
     let result = tokio::select! {
         _ = state.shutdown.cancelled() => Err(anyhow::anyhow!("scan cancelled")),
         result = scan_library(state) => result,
     };
-    let mut status = state.scan_status.lock().await;
+    let mut status = state.scan_status.lock().unwrap();
     status["running"] = false.into();
     match &result {
         Ok(report) => {
@@ -189,7 +205,7 @@ async fn scan_library(state: &AppState) -> anyhow::Result<ScanReport> {
             match index(state, &library_id, &generation, &path, &extension).await {
                 Ok(()) => {
                     report.indexed += 1;
-                    *state.scan_status.lock().await = serde_json::json!({"running":true,"indexed":report.indexed,"failed":report.failed,"phase":"Indexing library"});
+                    *state.scan_status.lock().unwrap() = serde_json::json!({"running":true,"indexed":report.indexed,"failed":report.failed,"phase":"Indexing library"});
                 }
                 Err(error) => {
                     report.failed += 1;

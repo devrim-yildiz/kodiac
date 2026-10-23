@@ -733,7 +733,7 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
     );
     drop(guard);
     // Reproduce stale progress left by a failed scan after indexing a file.
-    *f.state.scan_status.lock().await = json!({"running":true,"indexed":1});
+    *f.state.scan_status.lock().unwrap() = json!({"running":true,"indexed":1});
     tokio::fs::rename(
         &f.state.config.media_path,
         f._dir.path().join("temporarily-offline"),
@@ -741,7 +741,7 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
     .await
     .unwrap();
     assert!(scanner::scan(&f.state).await.is_err());
-    assert_eq!(f.state.scan_status.lock().await["running"], false);
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
     assert!(db::item(&f.state.pool, &f.item).await.is_ok());
     tokio::fs::rename(
         f._dir.path().join("temporarily-offline"),
@@ -766,10 +766,41 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
     })
     .await
     .unwrap();
-    assert_eq!(f.state.scan_status.lock().await["running"], false);
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
     f.state.shutdown.cancel();
     assert!(scanner::scan(&f.state).await.is_err());
-    assert_eq!(f.state.scan_status.lock().await["running"], false);
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
+}
+
+#[tokio::test]
+async fn aborted_scan_clears_status_before_releasing_its_lock() {
+    let f = Fixture::new().await;
+    let mut connections = Vec::new();
+    for _ in 0..8 {
+        connections.push(f.state.pool.acquire().await.unwrap());
+    }
+    let task = tokio::spawn({
+        let state = f.state.clone();
+        async move { scanner::scan(&state).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if f.state.scan_status.lock().unwrap()["running"] == true {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.is_err_and(|error| error.is_cancelled()));
+    let guard = f.state.scan_lock.try_lock().unwrap();
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
+    assert_eq!(f.state.scan_status.lock().unwrap()["complete"], false);
+    drop(guard);
+    drop(connections);
+    assert!(scanner::scan(&f.state).await.unwrap().complete);
 }
 
 #[tokio::test]

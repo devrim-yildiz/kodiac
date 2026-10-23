@@ -53,7 +53,7 @@ pub struct AppState {
     /// Monotonic startup instant used for uptime.
     pub started: std::time::Instant,
     /// Latest scan progress exposed by administrator diagnostics.
-    pub scan_status: Arc<Mutex<serde_json::Value>>,
+    pub scan_status: Arc<std::sync::Mutex<serde_json::Value>>,
     /// Shared SQLite connection pool.
     pub pool: sqlx::SqlitePool,
     /// Shared rate-limited metadata HTTP client.
@@ -88,7 +88,9 @@ impl AppState {
         Ok(Self {
             search_index: Arc::new(tokio::sync::RwLock::new(Arc::new(Default::default()))),
             started: std::time::Instant::now(),
-            scan_status: Arc::new(Mutex::new(serde_json::json!({"running":false,"indexed":0}))),
+            scan_status: Arc::new(std::sync::Mutex::new(
+                serde_json::json!({"running":false,"indexed":0}),
+            )),
             tmdb: Arc::new(scanner::tmdb_worker::TmdbClient::new()?),
             pool,
             transcodes: Arc::new(Semaphore::new(config.max_transcodes as usize)),

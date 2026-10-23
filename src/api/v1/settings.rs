@@ -235,6 +235,6 @@ async fn stats(State(s): State<AppState>, Extension(u): Extension<User>) -> Resu
         .map(|m| m.len())
         .unwrap_or(0);
     Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"rust_edition":"2024","architecture":std::env::consts::ARCH,"ffmpeg":ff,"uptime_seconds":s.started.elapsed().as_secs(),"db_bytes":db,"wal_bytes":wal,"artwork_bytes":disk(s.config.metadata_path.clone()).await,"media_count":count,"extracted_count":frames,"metadata_pending":pending,"scan":*s.scan_status.lock().await,"active_streams":sessions.iter().map(|(t,p,n)|json!({"title":t,"profile":p,"position_ticks":n})).collect::<Vec<_>>(),"logs":crate::diagnostics::recent()}),
+        json!({"version":env!("CARGO_PKG_VERSION"),"rust_edition":"2024","architecture":std::env::consts::ARCH,"ffmpeg":ff,"uptime_seconds":s.started.elapsed().as_secs(),"db_bytes":db,"wal_bytes":wal,"artwork_bytes":disk(s.config.metadata_path.clone()).await,"media_count":count,"extracted_count":frames,"metadata_pending":pending,"scan":*s.scan_status.lock().unwrap(),"active_streams":sessions.iter().map(|(t,p,n)|json!({"title":t,"profile":p,"position_ticks":n})).collect::<Vec<_>>(),"logs":crate::diagnostics::recent()}),
     ))
 }
