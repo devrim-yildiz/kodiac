@@ -196,11 +196,12 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
                         .bind(&id)
                         .execute(&mut *tx)
                         .await?;
-                        sqlx::query("UPDATE shows SET genres_json=?,title=CASE WHEN ?=0 THEN ? ELSE title END,overview=CASE WHEN overview='' THEN ? ELSE overview END,tmdb_id=?,poster_path=COALESCE(poster_path,?),backdrop_path=COALESCE(backdrop_path,?) WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)")
+                        sqlx::query("UPDATE shows SET genres_json=CASE WHEN genres_json='[]' OR NOT EXISTS(SELECT 1 FROM episodes e JOIN seasons se ON se.id=e.season_id JOIN media_items i ON i.id=e.id WHERE se.show_id=shows.id AND i.local_metadata=1) THEN ? ELSE genres_json END,title=CASE WHEN ?=0 THEN ? ELSE title END,overview=CASE WHEN overview='' THEN ? ELSE overview END,tmdb_id=?,poster_path=COALESCE(poster_path,?),backdrop_path=COALESCE(backdrop_path,?) WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)")
                             .bind(&data.genres_json).bind(local).bind(data.show_title).bind(data.show_overview).bind(data.tmdb_id).bind(&data.poster).bind(&data.backdrop).bind(&id).execute(&mut *tx).await?;
                         sqlx::query("UPDATE seasons SET poster_path=COALESCE(poster_path,?),overview=CASE WHEN overview='' THEN ? ELSE overview END WHERE id=(SELECT season_id FROM episodes WHERE id=?)").bind(data.season_poster).bind(data.season_overview).bind(&id).execute(&mut *tx).await?;
                     } else {
-                        sqlx::query("UPDATE movies SET genres_json=?,tmdb_id=? WHERE id=?")
+                        sqlx::query("UPDATE movies SET genres_json=CASE WHEN ?=0 OR genres_json='[]' THEN ? ELSE genres_json END,tmdb_id=? WHERE id=?")
+                            .bind(local)
                             .bind(&data.genres_json)
                             .bind(data.tmdb_id)
                             .bind(&id)
@@ -303,11 +304,11 @@ mod tests {
         let data = match path.as_str() {
             "search/movie" => json!({"results":[{"id":83,"title":"Alien Earth"}]}),
             "movie/83" => {
-                json!({"id":83,"title":"Alien Earth","overview":"Movie synopsis","poster_path":"/movie.jpg","backdrop_path":"/moviebackdrop.jpg","belongs_to_collection":{"id":99,"name":"Alien Collection"},"credits":{"cast":[{"name":"Remote Actor","id":7}]}})
+                json!({"id":83,"title":"Alien Earth","overview":"Movie synopsis","poster_path":"/movie.jpg","backdrop_path":"/moviebackdrop.jpg","genres":[{"id":18,"name":"Drama"}],"belongs_to_collection":{"id":99,"name":"Alien Collection"},"credits":{"cast":[{"name":"Remote Actor","id":7}]}})
             }
             "search/tv" => json!({"results":[{"id":42,"name":"Alien Earth"}]}),
             "tv/42" => {
-                json!({"id":42,"name":"Alien: Earth","overview":"Series synopsis","poster_path":"/poster.jpg","backdrop_path":"/backdrop.jpg"})
+                json!({"id":42,"name":"Alien: Earth","overview":"Series synopsis","poster_path":"/poster.jpg","backdrop_path":"/backdrop.jpg","genres":[{"id":18,"name":"Drama"}]})
             }
             "tv/42/season/1" => json!({"poster_path":"/season.jpg"}),
             "tv/42/season/1/episode/2" => {
@@ -362,6 +363,60 @@ mod tests {
         client.api_base = base.clone();
         client.image_base = format!("{base}images");
         (dir, state, mock, task)
+    }
+    #[tokio::test]
+    async fn enrichment_preserves_local_genres_and_fills_empty_genres() {
+        for movie in [false, true] {
+            let (_dir, state, _mock, server) = fixture(false).await;
+            sqlx::query("UPDATE media_items SET local_metadata=1 WHERE id='ep'")
+                .execute(&state.pool)
+                .await
+                .unwrap();
+            if movie {
+                sqlx::query("UPDATE media_items SET kind='movie',title='Alien Earth',series_name=NULL,season=NULL,episode=NULL WHERE id='ep'").execute(&state.pool).await.unwrap();
+            } else {
+                // The job for another episode must also preserve the show's local genres.
+                sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,series_name,season,episode,container,size_bytes,modified_ns,scan_generation,local_metadata) VALUES('local','lib','/fixture/local.mkv','episode','Local','Alien Earth',1,3,'mkv',1,'1','test',1)").execute(&state.pool).await.unwrap();
+                sqlx::query("UPDATE media_items SET local_metadata=0 WHERE id='ep'")
+                    .execute(&state.pool)
+                    .await
+                    .unwrap();
+            }
+            let table = if movie { "movies" } else { "shows" };
+            sqlx::query(&format!(
+                "UPDATE {table} SET genres_json='[{{\"id\":28,\"name\":\"Action\"}}]'"
+            ))
+            .execute(&state.pool)
+            .await
+            .unwrap();
+            assert!(run_once(&state).await.unwrap());
+            let genres: String = sqlx::query_scalar(&format!("SELECT genres_json FROM {table}"))
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&genres).unwrap()[0]["name"],
+                "Action"
+            );
+            sqlx::query(&format!("UPDATE {table} SET genres_json='[]'"))
+                .execute(&state.pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE tmdb_jobs SET next_attempt_at=0 WHERE media_item_id='ep'")
+                .execute(&state.pool)
+                .await
+                .unwrap();
+            assert!(run_once(&state).await.unwrap());
+            let genres: String = sqlx::query_scalar(&format!("SELECT genres_json FROM {table}"))
+                .fetch_one(&state.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&genres).unwrap()[0]["name"],
+                "Drama"
+            );
+            server.abort();
+        }
     }
     #[tokio::test]
     async fn artwork_is_downloaded_atomically_cached_and_applied_to_the_hierarchy() {
