@@ -1,27 +1,48 @@
+x-runtime: &runtime
+  image: kodiac:latest
+  build: .
+  restart: unless-stopped
+  stop_grace_period: 10s
+  pids_limit: 64
+  mem_limit: 768m
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+  environment:
+    HW_ACCEL: software
+    METADATA_PATH: /data/metadata
+    ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+  secrets:
+    - admin_password
+  volumes:
+    # Keep this database/cache on reliable local storage, separate from media disks.
+    - ./data:/data
+    - ${KODIAC_MEDIA_PATH:?Set KODIAC_MEDIA_PATH to an existing media directory}:/media:ro
 services:
   kodiac:
-    image: kodiac:latest
-    build: .
+    <<: *runtime
     container_name: kodiac
-    restart: unless-stopped
+    pids_limit: 192
+    mem_limit: 1g
     ports:
       - "8097:8096"
-    environment:
-      HW_ACCEL: software
-      METADATA_PATH: /data/metadata
-      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
-    secrets:
-      - admin_password
-    volumes:
-      - ./data:/data
-      - ${KODIAC_MEDIA_PATH:?Set KODIAC_MEDIA_PATH to an existing media directory}:/media:ro
-    command:
-      - --media-path
-      - /media
-      - --db-path
-      - /data/media.db
-      - --bind
-      - 0.0.0.0
+    command: [--role, server, --media-path, /media, --db-path, /data/media.db, --bind, 0.0.0.0]
+    healthcheck:
+      test: [CMD, perl, -MIO::Socket::INET, -e, '$$s=IO::Socket::INET->new(PeerAddr=>"127.0.0.1",PeerPort=>8096,Proto=>"tcp",Timeout=>2) or exit 1; print $$s "GET /api/v1/live HTTP/1.0\r\nHost: localhost\r\n\r\n"; $$r=<$$s>; exit(($$r // "") =~ m{^HTTP/1\.[01] 200\b} ? 0 : 1)']
+      interval: 15s
+      timeout: 3s
+      retries: 3
+  scanner:
+    <<: *runtime
+    command: [--role, scanner, --media-path, /media, --db-path, /data/media.db]
+  artwork:
+    <<: *runtime
+    command: [--role, artwork, --media-path, /media, --db-path, /data/media.db]
+  metadata:
+    <<: *runtime
+    command: [--role, metadata, --media-path, /media, --db-path, /data/media.db]
 secrets:
   admin_password:
     file: ./admin-password.secret

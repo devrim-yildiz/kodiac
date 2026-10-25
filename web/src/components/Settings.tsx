@@ -26,7 +26,8 @@ type Stats = {
   uptime_seconds: number;
   db_bytes: number;
   wal_bytes: number;
-  artwork_bytes: number;
+  artwork_bytes: number | null;
+  workers?: { name: string; status: string; updated_at: number }[];
   media_count: number;
   extracted_count: number;
   metadata_pending: number;
@@ -34,10 +35,12 @@ type Stats = {
   active_streams: { title: string; profile: string }[];
   logs: string[];
 };
-const bytes = (n = 0) =>
-  n < 1048576
-    ? `${(n / 1024).toFixed(1)} KB`
-    : `${(n / 1048576).toFixed(1)} MB`;
+const bytes = (n: number | null = 0) =>
+  n === null
+    ? "Unavailable"
+    : n < 1048576
+      ? `${(n / 1024).toFixed(1)} KB`
+      : `${(n / 1048576).toFixed(1)} MB`;
 export function Settings({
   open,
   onClose,
@@ -372,6 +375,24 @@ export function Settings({
                   ))}
                 </div>
                 <p className="ffmpeg-version">{stats?.ffmpeg}</p>
+                {stats?.workers?.length ? (
+                  <>
+                    <h3>Background jobs</h3>
+                    <div className="system-grid">
+                      {stats.workers.map((worker) => (
+                        <div key={worker.name}>
+                          <span>{worker.name}</span>
+                          <strong>
+                            {!["paused", "stopped"].includes(worker.status) &&
+                            Date.now() / 1000 - worker.updated_at > 30
+                              ? "Not responding"
+                              : worker.status}
+                          </strong>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
                 <h3>Active streaming sessions</h3>
                 {stats?.active_streams.length ? (
                   stats.active_streams.map((s, i) => (

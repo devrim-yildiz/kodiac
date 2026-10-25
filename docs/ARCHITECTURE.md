@@ -110,3 +110,34 @@ Direct play uses the media element; remux/conversion uses MediaSource or
 ManagedMediaSource when supported. Stream reads are backpressured, buffered history
 is pruned, unbuffered seeks restart the source, and progress writes serialize.
 Switching profile/source intentionally starts a new playback session.
+
+## Storage failures and independent workers
+
+Run the production Compose stack with separate `server`, `scanner`, `artwork`, and
+`metadata` roles. Keep `/data` (SQLite, WAL, and artwork cache) on reliable local
+storage; media mounts remain read-only. A failing media disk can still prevent
+playback, but a blocked scanner or FFmpeg worker has its own process, memory/PID
+budget, and restart policy. The default `all` role preserves standalone behavior;
+use the separate roles when process isolation is required.
+
+Both scan APIs enqueue a durable request in `server` mode. The single scanner
+process consumes requests and reports progress through `worker_status`; run only
+one scanner per database. Artwork/metadata jobs have a five-minute deadline;
+scans allow six hours overall, with 30 seconds per directory operation and
+90 seconds per media item. Worker shutdown is
+bounded because kernel disk I/O cannot always be cancelled. Search remains with
+the server because its snapshot is in memory. Password verification has a
+separate two-thread admission budget so media I/O cannot starve logins.
+
+`/api/v1/live` checks the HTTP process without reading storage. `/api/v1/health`
+checks SQLite with a two-second deadline. Response initialization has a
+15-second deadline (streaming bodies keep their existing lifetime limits).
+Logs contain request IDs, path without query strings, status, duration, and
+worker/error categories and OS/SQLite codes. Secrets, authorization headers,
+and remote error URLs are excluded. Compose rotates logs at 10 MB, three files.
+The admin diagnostics show worker states/heartbeat ages; an unavailable artwork
+size is reported as null instead of starting unlimited blocked directory walks.
+
+Docker RAM caps require host memory-cgroup support. Hosts without that support
+ignore `mem_limit`; process separation alone cannot prevent a host-wide OOM.
+PID/thread budgets and job/request deadlines still apply independently.
