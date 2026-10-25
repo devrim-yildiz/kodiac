@@ -130,16 +130,20 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
                 .await?
         }
     };
-    let valid = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        PasswordHash::new(&hash).is_ok_and(|h| {
-            Argon2::default()
-                .verify_password(credentials.password.as_bytes(), &h)
-                .is_ok()
-        })
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    // Disk I/O can exhaust Tokio's blocking pool; login has its own two-thread budget.
+    std::thread::Builder::new()
+        .name("password-verification".into())
+        .spawn(move || {
+            let _permit = permit;
+            let valid = PasswordHash::new(&hash).is_ok_and(|h| {
+                Argon2::default()
+                    .verify_password(credentials.password.as_bytes(), &h)
+                    .is_ok()
+            });
+            let _ = sender.send(valid);
+        })?;
+    let valid = receiver.await.map_err(|e| AppError::Internal(e.into()))?;
     let (id, username, _, is_admin) = row.filter(|_| valid).ok_or(AppError::Unauthorized)?;
     let token = format!(
         "{}{}",

@@ -2105,3 +2105,36 @@ async fn cinematic_real_frames_are_cached_and_served_without_overwriting_artwork
         Some(path)
     );
 }
+#[test]
+fn login_survives_an_exhausted_disk_io_pool() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let fixture = Fixture::new().await;
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let disk_task = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        ready.await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            auth::authenticate(
+                &fixture.state,
+                auth::Credentials {
+                    username: "admin".into(),
+                    password: "a-test-password-only".into(),
+                },
+            ),
+        )
+        .await;
+        release.send(()).unwrap();
+        disk_task.await.unwrap();
+        assert!(result.unwrap().is_ok());
+    });
+}
