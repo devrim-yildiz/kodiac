@@ -28,6 +28,31 @@ pub fn recent() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Report actionable failure categories/codes without logging credentials or remote URLs.
+pub fn failure(worker: &str, error: &anyhow::Error) {
+    let mut kind = "operation";
+    let mut code = String::new();
+    for cause in error.chain() {
+        if cause.is::<tokio::time::error::Elapsed>() {
+            kind = "timeout";
+        }
+        if let Some(error) = cause.downcast_ref::<sqlx::Error>() {
+            kind = "database";
+            if let sqlx::Error::Database(db) = error {
+                code = db.code().unwrap_or_default().into_owned();
+            }
+        }
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            kind = "storage_or_process_io";
+            code = error
+                .raw_os_error()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| format!("{:?}", error.kind()));
+        }
+    }
+    tracing::error!(worker, error_kind=kind, error_code=%code, "background operation failed; catalog retained");
+}
+
 /// Retain messages only: arbitrary debug fields may include private paths or URLs.
 pub struct LogLayer;
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogLayer {
@@ -35,8 +60,21 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogLayer {
         struct Message(String);
         impl tracing::field::Visit for Message {
             fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-                if f.name() == "message" {
-                    self.0 = format!("{v:?}")
+                if [
+                    "message",
+                    "worker",
+                    "error_kind",
+                    "error_code",
+                    "request_id",
+                    "status",
+                    "elapsed_ms",
+                ]
+                .contains(&f.name())
+                {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    self.0.push_str(&format!("{}={v:?}", f.name()));
                 }
             }
         }

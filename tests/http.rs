@@ -39,6 +39,7 @@ impl Fixture {
             .await
             .unwrap();
         let config = Config {
+            role: kodiac::config::Role::All,
             media_path: tokio::fs::canonicalize(media).await.unwrap(),
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 0,
@@ -2105,6 +2106,86 @@ async fn cinematic_real_frames_are_cached_and_served_without_overwriting_artwork
         Some(path)
     );
 }
+
+#[tokio::test]
+async fn server_role_queues_scan_without_accessing_offline_media() {
+    let fixture = Fixture::new().await;
+    let mut state = fixture.state.clone();
+    let config = std::sync::Arc::make_mut(&mut state.config);
+    config.role = kodiac::config::Role::Server;
+    config.media_path = PathBuf::from("/does-not-exist/offline-media");
+    let app = router(state.clone()).unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/settings/rescan")
+                .header("authorization", format!("Bearer {}", fixture.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let requested: bool =
+        sqlx::query_scalar("SELECT requested FROM worker_status WHERE name='scanner'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert!(requested);
+    for path in ["/api/v1/live", "/api/v1/health", "/"] {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            app.clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+}
+
+#[tokio::test]
+async fn stalled_request_times_out_while_liveness_stays_available() {
+    let fixture = Fixture::new().await;
+    let app = fixture
+        .app
+        .clone()
+        .route(
+            "/test-stall",
+            axum::routing::get(|| async { std::future::pending::<StatusCode>().await }),
+        )
+        .layer(axum::middleware::from_fn(kodiac::api::request_diagnostics));
+    let stalled = tokio::spawn(
+        app.clone().oneshot(
+            Request::builder()
+                .uri("/test-stall?api_key=secret-must-not-be-logged")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let live = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/live")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.status(), StatusCode::OK);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(17), stalled)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(response.headers().contains_key("x-request-id"));
+}
+
 #[test]
 fn login_survives_an_exhausted_disk_io_pool() {
     let runtime = tokio::runtime::Builder::new_multi_thread()

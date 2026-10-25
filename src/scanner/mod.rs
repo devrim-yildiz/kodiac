@@ -168,12 +168,19 @@ async fn scan_library(state: &AppState) -> anyhow::Result<ScanReport> {
         ..Default::default()
     };
     while let Some(directory) = directories.pop() {
-        let mut entries = tokio::fs::read_dir(directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
+        let mut entries = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::fs::read_dir(directory),
+        )
+        .await??;
+        while let Some(entry) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), entries.next_entry()).await??
+        {
             if state.shutdown.is_cancelled() {
                 anyhow::bail!("scan cancelled");
             }
-            let kind = entry.file_type().await?;
+            let kind = tokio::time::timeout(std::time::Duration::from_secs(30), entry.file_type())
+                .await??;
             if kind.is_symlink() {
                 continue;
             }
@@ -202,7 +209,12 @@ async fn scan_library(state: &AppState) -> anyhow::Result<ScanReport> {
             {
                 continue;
             }
-            match index(state, &library_id, &generation, &path, &extension).await {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                index(state, &library_id, &generation, &path, &extension),
+            )
+            .await?
+            {
                 Ok(()) => {
                     report.indexed += 1;
                     *state.scan_status.lock().unwrap() = serde_json::json!({"running":true,"indexed":report.indexed,"failed":report.failed,"phase":"Indexing library"});

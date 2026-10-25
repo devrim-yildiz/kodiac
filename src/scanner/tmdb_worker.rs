@@ -220,7 +220,8 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
             }
             tx.commit().await?;
         }
-        Err(_) => {
+        Err(error) => {
+            crate::diagnostics::failure("metadata", &error);
             // Store only a fixed diagnostic: reqwest error URLs can contain API credentials.
             let delay = 30_i64
                 .saturating_mul(1_i64 << attempts.clamp(0, 11))

@@ -43,7 +43,12 @@ pub fn router() -> Router<AppState> {
 }
 /// Check database connectivity and report health and package version.
 pub async fn health(State(state): State<AppState>) -> Result<Json<Value>> {
-    sqlx::query("SELECT 1").execute(&state.pool).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query("SELECT 1").execute(&state.pool),
+    )
+    .await
+    .map_err(|_| AppError::Busy)??;
     Ok(Json(
         json!({"status":"ok", "version":env!("CARGO_PKG_VERSION")}),
     ))
@@ -101,15 +106,27 @@ async fn me(Extension(user): Extension<User>) -> Json<Value> {
 async fn scan(
     State(state): State<AppState>,
     Extension(user): Extension<User>,
-) -> Result<Json<scanner::ScanReport>> {
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
     settings::admin(&state, &user).await?;
-    scanner::scan(&state).await.map(Json).map_err(|error| {
-        if error.is::<scanner::ScanBusy>() {
-            AppError::Busy
-        } else {
-            AppError::Internal(error)
-        }
-    })
+    if state.config.role == crate::config::Role::Server {
+        crate::workers::request_scan(&state).await?;
+        return Ok((
+            axum::http::StatusCode::ACCEPTED,
+            Json(json!({"accepted":true})),
+        )
+            .into_response());
+    }
+    scanner::scan(&state)
+        .await
+        .map(|report| Json(report).into_response())
+        .map_err(|error| {
+            if error.is::<scanner::ScanBusy>() {
+                AppError::Busy
+            } else {
+                AppError::Internal(error)
+            }
+        })
 }
 /// Playback update; positions use 100-nanosecond ticks and profiles remain account-scoped.
 #[derive(Deserialize)]
