@@ -32,6 +32,8 @@ pub struct User {
     pub id: String,
     /// Account username.
     pub username: String,
+    /// Current persisted administrator flag, refreshed when authenticating each request.
+    pub is_admin: bool,
 }
 fn hash_token(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
@@ -99,7 +101,10 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
         *window = (Instant::now(), 0);
     }
     if window.1 >= 30 {
-        return Err(AppError::Busy);
+        let remaining = Duration::from_secs(60).saturating_sub(window.0.elapsed());
+        return Err(AppError::RateLimited {
+            retry_after_seconds: remaining.as_secs().saturating_add(1).min(60),
+        });
     }
     window.1 += 1;
     drop(window);
@@ -111,8 +116,8 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
     if credentials.username.len() > 256 || credentials.password.len() > 1024 {
         return Err(AppError::Unauthorized);
     }
-    let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT id, username, password_hash FROM users WHERE username=?")
+    let row: Option<(String, String, String, bool)> =
+        sqlx::query_as("SELECT id, username, password_hash,is_admin FROM users WHERE username=?")
             .bind(credentials.username)
             .fetch_optional(&state.pool)
             .await?;
@@ -125,17 +130,21 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
                 .await?
         }
     };
-    let valid = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        PasswordHash::new(&hash).is_ok_and(|h| {
-            Argon2::default()
-                .verify_password(credentials.password.as_bytes(), &h)
-                .is_ok()
-        })
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))?;
-    let (id, username, _) = row.filter(|_| valid).ok_or(AppError::Unauthorized)?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    // Disk I/O can exhaust Tokio's blocking pool; login has its own two-thread budget.
+    std::thread::Builder::new()
+        .name("password-verification".into())
+        .spawn(move || {
+            let _permit = permit;
+            let valid = PasswordHash::new(&hash).is_ok_and(|h| {
+                Argon2::default()
+                    .verify_password(credentials.password.as_bytes(), &h)
+                    .is_ok()
+            });
+            let _ = sender.send(valid);
+        })?;
+    let valid = receiver.await.map_err(|e| AppError::Internal(e.into()))?;
+    let (id, username, _, is_admin) = row.filter(|_| valid).ok_or(AppError::Unauthorized)?;
     let token = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
@@ -151,7 +160,14 @@ pub async fn authenticate(state: &AppState, credentials: Credentials) -> Result<
     .bind(&id)
     .execute(&state.pool)
     .await?;
-    Ok((User { id, username }, token))
+    Ok((
+        User {
+            id,
+            username,
+            is_admin,
+        },
+        token,
+    ))
 }
 /// Format a strict HttpOnly session cookie with lifetime in seconds and optional Secure flag.
 pub fn cookie(state: &AppState, token: &str, age: u64) -> String {
@@ -231,10 +247,14 @@ pub async fn require_auth(
     if token.len() > 256 {
         return Err(AppError::Unauthorized);
     }
-    let row: Option<(String, String)> = sqlx::query_as("SELECT u.id,u.username FROM users u JOIN auth_tokens t ON t.user_id=u.id WHERE t.token_hash=? AND t.expires_at>unixepoch()")
+    let row: Option<(String, String, bool)> = sqlx::query_as("SELECT u.id,u.username,u.is_admin FROM users u JOIN auth_tokens t ON t.user_id=u.id WHERE t.token_hash=? AND t.expires_at>unixepoch()")
         .bind(hash_token(&token)).fetch_optional(&state.pool).await?;
-    let (id, username) = row.ok_or(AppError::Unauthorized)?;
-    req.extensions_mut().insert(User { id, username });
+    let (id, username, is_admin) = row.ok_or(AppError::Unauthorized)?;
+    req.extensions_mut().insert(User {
+        id,
+        username,
+        is_admin,
+    });
     req.extensions_mut().insert(TokenHash(hash_token(&token)));
     req.extensions_mut().insert(MediaToken(token));
     Ok(next.run(req).await)

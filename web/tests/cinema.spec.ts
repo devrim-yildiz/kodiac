@@ -344,3 +344,104 @@ test("desktop hero and scroll budget remain bounded for the full catalog", async
     contentType: "application/json",
   });
 });
+
+test("format failures recover through remux and conversion without losing position or looping", async ({
+  page,
+}) => {
+  const video = await startFilm(page);
+  await video.evaluate((v: HTMLVideoElement) => {
+    Object.defineProperty(v, "error", {
+      configurable: true,
+      value: { code: 2 },
+    });
+    v.dispatchEvent(new Event("error"));
+  });
+  await expect(video).toHaveAttribute("src", /mode=direct/);
+  const position = await video.evaluate((v: HTMLVideoElement) => v.currentTime);
+  const remux = page.waitForRequest((r) => r.url().includes("mode=remux"));
+  await video.evaluate((v: HTMLVideoElement) => {
+    Object.defineProperty(v, "error", {
+      configurable: true,
+      value: { code: 4 },
+    });
+    v.dispatchEvent(new Event("error"));
+    delete (v as any).error;
+  });
+  expect(
+    Number(new URL((await remux).url()).searchParams.get("start_seconds")),
+  ).toBeGreaterThanOrEqual(position - 1);
+  await expect
+    .poll(() =>
+      video.evaluate(
+        (v: HTMLVideoElement, position: number) =>
+          !v.paused && v.readyState >= 3 && v.currentTime >= position,
+        position,
+      ),
+    )
+    .toBe(true);
+  const converted = page.waitForRequest((r) =>
+    r.url().includes("mode=transcode"),
+  );
+  await video.evaluate((v: HTMLVideoElement) => {
+    Object.defineProperty(v, "error", {
+      configurable: true,
+      value: { code: 3 },
+    });
+    v.dispatchEvent(new Event("error"));
+    delete (v as any).error;
+  });
+  await converted;
+  await expect
+    .poll(() =>
+      video.evaluate(
+        (v: HTMLVideoElement, position: number) =>
+          !v.paused && v.readyState >= 3 && v.currentTime >= position,
+        position,
+      ),
+    )
+    .toBe(true);
+  const finalSource = await video.getAttribute("src");
+  await video.evaluate((v: HTMLVideoElement) => {
+    Object.defineProperty(v, "error", {
+      configurable: true,
+      value: { code: 3 },
+    });
+    v.dispatchEvent(new Event("error"));
+    delete (v as any).error;
+  });
+  await expect(page.getByRole("alert")).toContainText(
+    "This format could not play",
+  );
+  await expect(video).toHaveAttribute("src", finalSource!);
+});
+
+test("preferred audio uses a selectable stream instead of silently playing default audio", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/playback-defaults", (route) =>
+    route.fulfill({
+      json: { audio_language_preference: "deu", subtitle_mode: "off" },
+    }),
+  );
+  const remux = page.waitForRequest(
+    (r) => r.url().includes("mode=remux") && r.url().includes("audio_index=1"),
+  );
+  await startFilm(page);
+  await remux;
+});
+
+test("an unsupported original response recovers through actual remux playback", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/items/*/stream?**", (route) => {
+    if (new URL(route.request().url()).searchParams.get("mode") === "direct")
+      return route.fulfill({
+        contentType: "video/x-unsupported",
+        body: "unsupported media fixture",
+      });
+    return route.continue();
+  });
+  const remux = page.waitForRequest((r) => r.url().includes("mode=remux"));
+  await startFilm(page);
+  await remux;
+});

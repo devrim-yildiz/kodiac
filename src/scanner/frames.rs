@@ -18,6 +18,9 @@ pub async fn run_once(s: &AppState) -> anyhow::Result<bool> {
         return Ok(false);
     };
     let result = extract(s, &id, &path, duration).await;
+    if let Err(error) = &result {
+        crate::diagnostics::failure("artwork", error);
+    }
     if let Ok(path) = result {
         let mut tx = s.pool.begin().await?;
         sqlx::query("UPDATE media_items SET poster_path=COALESCE(poster_path,?),backdrop_path=COALESCE(backdrop_path,?) WHERE id=?").bind(&path).bind(&path).bind(&id).execute(&mut *tx).await?;

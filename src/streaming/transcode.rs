@@ -80,8 +80,6 @@ pub async fn serve_selected(
     start_seconds: f64,
     audio_index: Option<usize>,
 ) -> Result<Response> {
-    let effective = crate::api::v1::settings::effective(state).await?;
-    let state = &effective;
     serve_output(state, path, transcode, start_seconds, audio_index, false).await
 }
 /// Encode one six-second H.264/AAC MPEG-TS segment starting at the requested time.

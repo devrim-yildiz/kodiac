@@ -10,13 +10,32 @@
 //! Windows. Raspberry Pi 5 should use software or direct play/remux; this release
 //! does not implement a V4L2 request/DRM decoder backend.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::{net::IpAddr, path::PathBuf};
+
+/// Select independently supervised processes in a deployment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Role {
+    /// Standalone compatibility mode with all jobs in one process.
+    #[default]
+    All,
+    /// HTTP API, embedded UI and in-memory search only.
+    Server,
+    /// Library discovery and durable scan requests.
+    Scanner,
+    /// Fallback frame extraction.
+    Artwork,
+    /// Remote metadata enrichment.
+    Metadata,
+}
 
 /// Server startup settings; clap validates CLI values and environment overrides.
 #[derive(Clone, Parser)]
 #[command(version, about)]
 pub struct Config {
+    /// Use separate server/scanner/artwork/metadata containers for failure isolation.
+    #[arg(long, env = "KODIAC_ROLE", value_enum, default_value_t = Role::All)]
+    pub role: Role,
     /// Existing library root selected by `--media-path` or `MEDIA_PATH`.
     #[arg(long, env = "MEDIA_PATH")]
     pub media_path: PathBuf,
