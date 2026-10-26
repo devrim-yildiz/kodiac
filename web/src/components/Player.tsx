@@ -127,6 +127,23 @@ export function Player() {
   useEffect(() => {
     const current = usePlayer.getState();
     if (!current.item || !current.source || !video.current) return;
+    if (current.mode === "direct" && current.audioIndex != null) {
+      const audio = current.source.MediaStreams.filter(
+        (s) => s.Type === "Audio",
+      )[current.audioIndex]?.Codec;
+      const mode = canBuffer("remux", current.item, audio)
+        ? "remux"
+        : "transcode";
+      if (canBuffer(mode, current.item, audio)) {
+        current.patch({ mode });
+        return;
+      }
+      current.patch({
+        audioIndex: null,
+        error: "Audio switching requires MediaSource support in this browser.",
+      });
+      return;
+    }
     const instance = new PlaybackEngine(
       video.current,
       current.item,

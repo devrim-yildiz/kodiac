@@ -39,6 +39,7 @@ impl Fixture {
             .await
             .unwrap();
         let config = Config {
+            role: kodiac::config::Role::All,
             media_path: tokio::fs::canonicalize(media).await.unwrap(),
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 0,
@@ -123,6 +124,301 @@ impl Fixture {
 }
 async fn value(response: axum::response::Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn jellyfin_playback_enable_flags_respect_query_and_body() {
+    let f = Fixture::new().await;
+    let url = format!(
+        "/Items/{}/PlaybackInfo?EnableDirectPlay=false&EnableDirectStream=false&EnableTranscoding=false",
+        f.item
+    );
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&url)
+                .header("x-emby-token", &f.token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let info = value(response).await;
+    for flag in [
+        "SupportsDirectPlay",
+        "SupportsDirectStream",
+        "SupportsTranscoding",
+    ] {
+        assert_eq!(info["MediaSources"][0][flag], false);
+    }
+    assert_eq!(info["ErrorCode"], "NoCompatibleStream");
+    let info = value(
+        f.request("POST", &url, &[], json!({"EnableDirectPlay":true}))
+            .await,
+    )
+    .await;
+    assert_eq!(info["MediaSources"][0]["SupportsDirectPlay"], true);
+    assert_eq!(info["MediaSources"][0]["SupportsDirectStream"], false);
+    assert!(info["MediaSources"][0]["DirectStreamUrl"].is_null());
+
+    sqlx::query("UPDATE media_items SET streams_json=?,video_codec='hevc',audio_codec='aac' WHERE id=?")
+        .bind(json!([{"index":0,"codec_type":"video","codec_name":"hevc"},{"index":1,"codec_type":"audio","codec_name":"aac"}]).to_string())
+        .bind(&f.item).execute(&f.state.pool).await.unwrap();
+    let profile = json!({"TranscodingProfiles":[{"Type":"Video","Container":"mp4","Protocol":"http","VideoCodec":"h264","AudioCodec":"aac"}]});
+    let info = value(
+        f.request("POST", &url, &[], json!({"DeviceProfile":profile}))
+            .await,
+    )
+    .await;
+    assert_eq!(info["MediaSources"][0]["SupportsTranscoding"], false);
+    let info = value(
+        f.request(
+            "POST",
+            &url,
+            &[],
+            json!({"DeviceProfile":profile,"EnableTranscoding":true}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(info["MediaSources"][0]["SupportsTranscoding"], true);
+}
+
+#[tokio::test]
+async fn jellyfin_watched_state_uses_only_the_default_profile() {
+    let f = Fixture::new().await;
+    sqlx::query("INSERT INTO profiles(id,user_id,name) VALUES('other',?,'Other')")
+        .bind(&f.user)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    for (profile, completed, expected) in [
+        ("other", true, false),
+        (f.user.as_str(), true, true),
+        (f.user.as_str(), false, false),
+    ] {
+        assert_eq!(f.request("POST","/api/v1/playback",&[],json!({"item_id":f.item,"profile_id":profile,"position_ticks":500,"completed":completed})).await.status(),StatusCode::NO_CONTENT);
+        for path in [
+            format!("/Items/{}", f.item),
+            format!("/Users/{}/Items/{}", f.user, f.item),
+        ] {
+            let item = value(f.request("GET", &path, &[], Value::Null).await).await;
+            assert_eq!(item["UserData"]["Played"], expected);
+            assert_eq!(item["UserData"]["PlayCount"], i32::from(expected));
+        }
+        for path in ["/Items".to_owned(), format!("/Users/{}/Items", f.user)] {
+            let page = value(f.request("GET", &path, &[], Value::Null).await).await;
+            assert_eq!(page["Items"][0]["UserData"]["Played"], expected);
+        }
+    }
+}
+
+#[tokio::test]
+async fn jellyfin_user_policy_reflects_current_persisted_role() {
+    let f = Fixture::new().await;
+    for is_admin in [true, false] {
+        sqlx::query("UPDATE users SET is_admin=? WHERE id=?")
+            .bind(is_admin)
+            .bind(&f.user)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        for path in ["/Users/Me".to_owned(), format!("/Users/{}", f.user)] {
+            let user = value(f.request("GET", &path, &[], Value::Null).await).await;
+            assert_eq!(user["Policy"]["IsAdministrator"], is_admin);
+        }
+        let login = value(
+            f.request(
+                "POST",
+                "/Users/AuthenticateByName",
+                &[],
+                json!({"Username":"admin","Pw":"a-test-password-only"}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(login["User"]["Policy"]["IsAdministrator"], is_admin);
+    }
+    assert_eq!(
+        f.request("POST", "/api/v1/scan", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn jellyfin_pages_only_load_selected_media_and_preserve_navigation() {
+    let f = Fixture::new().await;
+    let library: String = sqlx::query_scalar("SELECT library_id FROM media_items WHERE id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let mut tx = f.state.pool.begin().await.unwrap();
+    for n in 0..200 {
+        sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,container,size_bytes,modified_ns,scan_generation) VALUES(?,?,?,'movie',?,'mp4',1,'1','test')")
+            .bind(format!("bulk{n:04}")).bind(&library).bind(format!("/fixture/{n}.mp4")).bind(format!("Film{n:04}")).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("UPDATE media_items SET streams_json=CAST(X'80' AS TEXT) WHERE id='bulk0199'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for (id, name, season, episode) in [
+        ("ep1", "Ähre", 1, 1),
+        ("ep2", "Ähre", 2, 1),
+        ("ep3", "Andere", 1, 1),
+        ("ep4", "äpfel", 1, 1),
+        ("ep5", "Äther", 1, 1),
+    ] {
+        sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,series_name,season,episode,container,size_bytes,modified_ns,scan_generation) VALUES(?,?,?,'episode',?,?,?,?, 'mkv',1,'1','test')")
+            .bind(id).bind(&library).bind(format!("/fixture/{id}.mkv")).bind(id).bind(name).bind(season).bind(episode).execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    assert!(db::item(&f.state.pool, "bulk0199").await.is_err());
+    let response = f
+        .request(
+            "GET",
+            "/Items?IncludeItemTypes=Movie&Limit=2&StartIndex=3&SortBy=Name",
+            &[],
+            Value::Null,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = value(response).await;
+    assert_eq!(page["TotalRecordCount"], 201);
+    assert_eq!(page["StartIndex"], 3);
+    assert_eq!(page["Items"][0]["Id"], "bulk0003");
+    assert_eq!(page["Items"][1]["Id"], "bulk0004");
+    let page = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Movie&SearchTerm=Film0003&Limit=1",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page["TotalRecordCount"], 1);
+    assert_eq!(page["Items"][0]["Id"], "bulk0003");
+    let page = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Movie&Limit=0",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page["TotalRecordCount"], 201);
+    assert!(page["Items"].as_array().unwrap().is_empty());
+    let page = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Series&SearchTerm=%C3%A4H&SortOrder=Descending",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page["TotalRecordCount"], 1);
+    let sid = kodiac::api::jellyfin::navigation::series_id("Ähre");
+    let ordered = value(
+        f.request(
+            "GET",
+            "/Items?IncludeItemTypes=Series&SortBy=Name",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    let names: Vec<_> = ordered["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["Name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Andere", "Ähre", "äpfel", "Äther"]);
+    assert_eq!(page["Items"][0]["Id"], sid);
+    assert_eq!(
+        kodiac::api::jellyfin::navigation::representative(&f.state, &sid)
+            .await
+            .unwrap()
+            .id,
+        "ep1"
+    );
+    let seasons = value(
+        f.request(
+            "GET",
+            &format!("/Shows/{sid}/Seasons?SortBy=IndexNumber&SortOrder=Descending&Limit=1"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(seasons["TotalRecordCount"], 2);
+    assert_eq!(seasons["Items"][0]["IndexNumber"], 2);
+    let episodes = value(
+        f.request(
+            "GET",
+            &format!("/Shows/{sid}/Episodes?SortBy=ParentIndexNumber,IndexNumber"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(episodes["TotalRecordCount"], 2);
+    assert_eq!(episodes["Items"][0]["Id"], "ep1");
+    assert_eq!(episodes["Items"][1]["Id"], "ep2");
+    let mixed = value(
+        f.request(
+            "GET",
+            &format!("/Items?ParentId={sid}&IncludeItemTypes=Series,Season,Episode&Limit=1"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(mixed["TotalRecordCount"], 5);
+    assert_eq!(mixed["Items"].as_array().unwrap().len(), 1);
+    sqlx::query("INSERT INTO libraries(id,name,path) VALUES('other-library','Other','/other')")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,container,size_bytes,modified_ns,scan_generation) VALUES('other-movie','other-library','/other/movie.mp4','movie','Other','mp4',1,'1','test')").execute(&f.state.pool).await.unwrap();
+    let scoped = value(
+        f.request(
+            "GET",
+            "/Items?ParentId=other-library&IncludeItemTypes=Movie",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(scoped["TotalRecordCount"], 1);
+    assert_eq!(scoped["Items"][0]["Id"], "other-movie");
+    assert_eq!(
+        f.request("GET", "/Items?ParentId=missing", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        f.request("GET", "/Items?UserId=someone-else", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -465,7 +761,10 @@ async fn expired_tokens_and_throttling() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    f.state.login_window.lock().await.1 = 30;
+    *f.state.login_window.lock().await = (
+        std::time::Instant::now() - std::time::Duration::from_secs(40),
+        30,
+    );
     let response = f
         .app
         .clone()
@@ -478,6 +777,25 @@ async fn expired_tokens_and_throttling() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = response.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=20).contains(&retry));
+
+    f.state.login_window.lock().await.1 = 0;
+    let _slots = f.state.login_slots.acquire_many(2).await.unwrap();
+    let response = f
+        .request(
+            "POST",
+            "/api/v1/login",
+            &[],
+            json!({"username":"admin","password":"bad"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key("retry-after"));
 }
 
 #[tokio::test]
@@ -618,9 +936,11 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
         f.request("POST", "/api/v1/scan", &[], Value::Null)
             .await
             .status(),
-        StatusCode::TOO_MANY_REQUESTS
+        StatusCode::SERVICE_UNAVAILABLE
     );
     drop(guard);
+    // Reproduce stale progress left by a failed scan after indexing a file.
+    *f.state.scan_status.lock().unwrap() = json!({"running":true,"indexed":1});
     tokio::fs::rename(
         &f.state.config.media_path,
         f._dir.path().join("temporarily-offline"),
@@ -628,7 +948,66 @@ async fn failed_scan_retains_catalog_and_concurrent_scan_is_busy() {
     .await
     .unwrap();
     assert!(scanner::scan(&f.state).await.is_err());
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
     assert!(db::item(&f.state.pool, &f.item).await.is_ok());
+    tokio::fs::rename(
+        f._dir.path().join("temporarily-offline"),
+        &f.state.config.media_path,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.request("POST", "/api/v1/settings/rescan", &[], Value::Null)
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(guard) = f.state.scan_lock.try_lock() {
+                drop(guard);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
+    f.state.shutdown.cancel();
+    assert!(scanner::scan(&f.state).await.is_err());
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
+}
+
+#[tokio::test]
+async fn aborted_scan_clears_status_before_releasing_its_lock() {
+    let f = Fixture::new().await;
+    let mut connections = Vec::new();
+    for _ in 0..8 {
+        connections.push(f.state.pool.acquire().await.unwrap());
+    }
+    let task = tokio::spawn({
+        let state = f.state.clone();
+        async move { scanner::scan(&state).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if f.state.scan_status.lock().unwrap()["running"] == true {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.is_err_and(|error| error.is_cancelled()));
+    let guard = f.state.scan_lock.try_lock().unwrap();
+    assert_eq!(f.state.scan_status.lock().unwrap()["running"], false);
+    assert_eq!(f.state.scan_status.lock().unwrap()["complete"], false);
+    drop(guard);
+    drop(connections);
+    assert!(scanner::scan(&f.state).await.unwrap().complete);
 }
 
 #[tokio::test]
@@ -647,6 +1026,132 @@ async fn changing_the_configured_root_hides_previous_library() {
     )
     .await;
     assert_eq!(views["TotalRecordCount"], 2);
+}
+
+#[tokio::test]
+async fn nfo_rescans_replace_local_links_atomically() {
+    let f = Fixture::new().await;
+    let nfo = f.state.config.media_path.join("sample.nfo");
+    for (actor, director, collection) in [("Alice", "First", "Old"), ("Bob", "Second", "New")] {
+        tokio::fs::write(&nfo, format!("<movie><title>{actor}</title><actor><name>{actor}</name></actor><director>{director}</director><set><name>{collection}</name></set></movie>")).await.unwrap();
+        scanner::scan(&f.state).await.unwrap();
+        let credits: Vec<(String, String)> =
+            sqlx::query_as("SELECT name,role FROM item_people WHERE item_id=? ORDER BY role")
+                .bind(&f.item)
+                .fetch_all(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            credits,
+            vec![
+                (actor.into(), "Actor".into()),
+                (director.into(), "Director".into())
+            ]
+        );
+        let collections: Vec<String> = sqlx::query_scalar("SELECT title FROM collections c JOIN collection_movies m ON m.collection_id=c.id WHERE m.movie_id=?")
+            .bind(&f.item).fetch_all(&f.state.pool).await.unwrap();
+        assert_eq!(collections, [collection]);
+    }
+    // A failure after deleting old links must also roll back the title and new links.
+    sqlx::query("CREATE TRIGGER reject_credit BEFORE INSERT ON item_people BEGIN SELECT RAISE(ABORT,'fixture failure'); END")
+        .execute(&f.state.pool).await.unwrap();
+    tokio::fs::write(&nfo, "<movie><title>Rejected</title><actor><name>Rejected</name></actor><set><name>Rejected</name></set></movie>").await.unwrap();
+    assert_eq!(scanner::scan(&f.state).await.unwrap().failed, 1);
+    assert_eq!(db::item(&f.state.pool, &f.item).await.unwrap().title, "Bob");
+    let credits: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM item_people WHERE item_id=? ORDER BY name")
+            .bind(&f.item)
+            .fetch_all(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(credits, ["Bob", "Second"]);
+    let collections: Vec<String> = sqlx::query_scalar("SELECT title FROM collections c JOIN collection_movies m ON m.collection_id=c.id WHERE m.movie_id=?")
+        .bind(&f.item).fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(collections, ["New"]);
+    sqlx::query("DROP TRIGGER reject_credit")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+
+    // Missing or invalid NFO is not authoritative and must preserve existing links.
+    tokio::fs::remove_file(&nfo).await.unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM item_people WHERE item_id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    tokio::fs::write(&nfo, "<movie><year>invalid</year></movie>")
+        .await
+        .unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM item_people WHERE item_id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    sqlx::query("INSERT INTO collections(id,title) VALUES('tmdb:fixture','Remote')")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO collection_movies(collection_id,movie_id) VALUES('tmdb:fixture',?)")
+        .bind(&f.item)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    tokio::fs::write(&nfo, "<movie><title>Empty credits</title></movie>")
+        .await
+        .unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM item_people WHERE item_id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let collections: Vec<String> =
+        sqlx::query_scalar("SELECT collection_id FROM collection_movies WHERE movie_id=?")
+            .bind(&f.item)
+            .fetch_all(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(collections, ["tmdb:fixture"]);
+}
+
+#[tokio::test]
+async fn diagnostics_count_extracted_artwork_with_either_separator() {
+    let f = Fixture::new().await;
+    for path in [
+        "/cache/extracted/frame.jpg",
+        r"C:\cache\extracted\frame.jpg",
+    ] {
+        sqlx::query("UPDATE media_items SET poster_path=?,backdrop_path=NULL WHERE id=?")
+            .bind(path)
+            .bind(&f.item)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let stats = value(
+            f.request("GET", "/api/v1/settings/stats", &[], Value::Null)
+                .await,
+        )
+        .await;
+        assert_eq!(stats["extracted_count"], 1);
+        sqlx::query("UPDATE media_items SET backdrop_path=poster_path,poster_path=NULL WHERE id=?")
+            .bind(&f.item)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let stats = value(
+            f.request("GET", "/api/v1/settings/stats", &[], Value::Null)
+                .await,
+        )
+        .await;
+        assert_eq!(stats["extracted_count"], 1);
+    }
 }
 
 #[tokio::test]
@@ -1366,6 +1871,41 @@ async fn relational_catalog_profiles_and_continue_watching_are_isolated() {
 #[tokio::test]
 async fn cinematic_settings_are_admin_only_masked_atomic_and_dynamic() {
     let f = Fixture::new().await;
+    for mode in [
+        "auto",
+        "software",
+        "vaapi",
+        "nvenc",
+        "qsv",
+        "amf",
+        "videotoolbox",
+    ] {
+        assert_eq!(
+            f.request("POST", "/api/v1/settings", &[], json!({"hw_accel":mode}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            kodiac::api::v1::settings::effective(&f.state)
+                .await
+                .unwrap()
+                .config
+                .hw_accel,
+            mode
+        );
+    }
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/v1/settings",
+            &[],
+            json!({"hw_accel":"unknown"})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
     let response=f.request("POST","/api/v1/settings",&[],json!({"tmdb_api_key":"private-fixture-key","hw_accel":"software","audio_language_preference":"deu"})).await;
     assert_eq!(response.status(), StatusCode::OK);
     let masked = value(response).await;
@@ -1418,6 +1958,12 @@ async fn cinematic_settings_are_admin_only_masked_atomic_and_dynamic() {
     }
     assert_eq!(
         f.request("POST", "/api/v1/settings/rescan", &[], json!({}))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        f.request("POST", "/api/v1/scan", &[], Value::Null)
             .await
             .status(),
         StatusCode::FORBIDDEN
@@ -1559,4 +2105,117 @@ async fn cinematic_real_frames_are_cached_and_served_without_overwriting_artwork
         db::item(&f.state.pool, &f.item).await.unwrap().poster_path,
         Some(path)
     );
+}
+
+#[tokio::test]
+async fn server_role_queues_scan_without_accessing_offline_media() {
+    let fixture = Fixture::new().await;
+    let mut state = fixture.state.clone();
+    let config = std::sync::Arc::make_mut(&mut state.config);
+    config.role = kodiac::config::Role::Server;
+    config.media_path = PathBuf::from("/does-not-exist/offline-media");
+    let app = router(state.clone()).unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/settings/rescan")
+                .header("authorization", format!("Bearer {}", fixture.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let requested: bool =
+        sqlx::query_scalar("SELECT requested FROM worker_status WHERE name='scanner'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    assert!(requested);
+    for path in ["/api/v1/live", "/api/v1/health", "/"] {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            app.clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+}
+
+#[tokio::test]
+async fn stalled_request_times_out_while_liveness_stays_available() {
+    let fixture = Fixture::new().await;
+    let app = fixture
+        .app
+        .clone()
+        .route(
+            "/test-stall",
+            axum::routing::get(|| async { std::future::pending::<StatusCode>().await }),
+        )
+        .layer(axum::middleware::from_fn(kodiac::api::request_diagnostics));
+    let stalled = tokio::spawn(
+        app.clone().oneshot(
+            Request::builder()
+                .uri("/test-stall?api_key=secret-must-not-be-logged")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    let live = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/live")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live.status(), StatusCode::OK);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(17), stalled)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(response.headers().contains_key("x-request-id"));
+}
+
+#[test]
+fn login_survives_an_exhausted_disk_io_pool() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let fixture = Fixture::new().await;
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let disk_task = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        ready.await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            auth::authenticate(
+                &fixture.state,
+                auth::Credentials {
+                    username: "admin".into(),
+                    password: "a-test-password-only".into(),
+                },
+            ),
+        )
+        .await;
+        release.send(()).unwrap();
+        disk_task.await.unwrap();
+        assert!(result.unwrap().is_ok());
+    });
 }

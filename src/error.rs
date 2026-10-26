@@ -22,7 +22,13 @@ pub enum AppError {
     /// Invalid client input with a safe public explanation.
     #[error("{0}")]
     BadRequest(String),
-    /// A concurrency or attempt budget is exhausted; retry later.
+    /// The login attempt budget is exhausted until the current window resets.
+    #[error("too many login attempts; retry later")]
+    RateLimited {
+        /// Seconds until another login attempt is allowed.
+        retry_after_seconds: u64,
+    },
+    /// A concurrency budget is exhausted; retry later.
     #[error("server busy; retry later")]
     Busy,
     /// Media initialization or supervised processing failed.
@@ -53,7 +59,8 @@ impl IntoResponse for AppError {
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
             Self::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            Self::Busy => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            Self::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            Self::Busy => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
             Self::Pipeline => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::Internal(e) => {
                 tracing::error!(error = %e, "request failed");
@@ -67,10 +74,14 @@ impl IntoResponse for AppError {
         response
             .headers_mut()
             .insert("cache-control", "no-store".parse().unwrap());
-        if code == StatusCode::TOO_MANY_REQUESTS {
-            response
-                .headers_mut()
-                .insert("retry-after", "60".parse().unwrap());
+        if let Self::RateLimited {
+            retry_after_seconds,
+        } = self
+        {
+            response.headers_mut().insert(
+                "retry-after",
+                retry_after_seconds.to_string().parse().unwrap(),
+            );
         }
         response
     }

@@ -40,6 +40,7 @@ pub mod error;
 pub mod scanner;
 pub mod streaming;
 pub mod ui;
+pub mod workers;
 
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -53,7 +54,7 @@ pub struct AppState {
     /// Monotonic startup instant used for uptime.
     pub started: std::time::Instant,
     /// Latest scan progress exposed by administrator diagnostics.
-    pub scan_status: Arc<Mutex<serde_json::Value>>,
+    pub scan_status: Arc<std::sync::Mutex<serde_json::Value>>,
     /// Shared SQLite connection pool.
     pub pool: sqlx::SqlitePool,
     /// Shared rate-limited metadata HTTP client.
@@ -88,7 +89,9 @@ impl AppState {
         Ok(Self {
             search_index: Arc::new(tokio::sync::RwLock::new(Arc::new(Default::default()))),
             started: std::time::Instant::now(),
-            scan_status: Arc::new(Mutex::new(serde_json::json!({"running":false,"indexed":0}))),
+            scan_status: Arc::new(std::sync::Mutex::new(
+                serde_json::json!({"running":false,"indexed":0}),
+            )),
             tmdb: Arc::new(scanner::tmdb_worker::TmdbClient::new()?),
             pool,
             transcodes: Arc::new(Semaphore::new(config.max_transcodes as usize)),
@@ -151,11 +154,13 @@ pub fn router(state: AppState) -> anyhow::Result<axum::Router> {
         ));
     Ok(axum::Router::new().merge(protected).merge(api::jellyfin::public_router())
         .route("/api/v1/health", get(api::v1::health))
+        .route("/api/v1/live", get(|| async { axum::Json(serde_json::json!({"status":"alive"})) }))
         .route("/api/v1/login", axum::routing::post(auth::login))
         .fallback(ui::serve)
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(api::security_headers))
         .layer(cors)
+        .layer(middleware::from_fn(api::request_diagnostics))
         // Do not use the default request span: URIs can contain Jellyfin access tokens.
         .layer(TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<axum::body::Body>| tracing::info_span!("http", method = %req.method(), path = %req.uri().path())))
         .with_state(state))

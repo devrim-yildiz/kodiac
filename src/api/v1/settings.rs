@@ -91,7 +91,16 @@ async fn write(
     for (k, x) in &v {
         let valid = match k.as_str() {
             "tmdb_api_key" => x.len() <= 512 && !x.contains(char::is_whitespace),
-            "hw_accel" => ["auto", "software", "vaapi", "videotoolbox"].contains(&x.as_str()),
+            "hw_accel" => [
+                "auto",
+                "software",
+                "vaapi",
+                "nvenc",
+                "qsv",
+                "amf",
+                "videotoolbox",
+            ]
+            .contains(&x.as_str()),
             "transcode_preset" => {
                 ["ultrafast", "superfast", "veryfast", "fast", "medium"].contains(&x.as_str())
             }
@@ -147,22 +156,26 @@ async fn rescan(
     Extension(u): Extension<User>,
 ) -> Result<(StatusCode, Json<Value>)> {
     admin(&s, &u).await?;
-    let mut status = s.scan_status.lock().await;
-    if status["running"] == true || s.scan_lock.try_lock().is_err() {
-        return Err(AppError::Busy);
+    if s.config.role == crate::config::Role::Server {
+        crate::workers::request_scan(&s).await?;
+        sqlx::query("UPDATE tmdb_jobs SET next_attempt_at=0,completed_at=NULL,attempts=0")
+            .execute(&s.pool)
+            .await?;
+        sqlx::query("UPDATE frame_jobs SET next_attempt_at=0")
+            .execute(&s.pool)
+            .await?;
+        return Ok((StatusCode::ACCEPTED, Json(json!({"accepted":true}))));
     }
-    *status = json!({"running":true,"indexed":0,"failed":0,"phase":"Indexing library"});
-    drop(status);
+    let guard = s
+        .scan_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| AppError::Busy)?;
     let worker = s.clone();
     tokio::spawn(async move {
-        let result = crate::scanner::scan(&worker).await;
-        let mut status = worker.scan_status.lock().await;
-        *status = match result {
-            Ok(r) => {
-                json!({"running":false,"indexed":r.indexed,"failed":r.failed,"complete":r.complete,"phase":"Scan complete; artwork enrichment continues"})
-            }
-            Err(_) => json!({"running":false,"phase":"Scan failed; previous catalog retained"}),
-        };
+        if let Err(error) = crate::scanner::scan_locked(&worker, guard).await {
+            tracing::warn!(%error, "scan failed; previous catalog retained");
+        }
     });
     sqlx::query("UPDATE tmdb_jobs SET next_attempt_at=0,completed_at=NULL,attempts=0")
         .execute(&s.pool)
@@ -172,27 +185,35 @@ async fn rescan(
         .await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted":true}))))
 }
-async fn disk(path: std::path::PathBuf) -> u64 {
-    tokio::task::spawn_blocking(move || {
-        let mut sum = 0;
-        let mut dirs = vec![path];
-        while let Some(p) = dirs.pop() {
-            if let Ok(es) = std::fs::read_dir(p) {
-                for e in es.flatten() {
-                    if let Ok(m) = e.metadata() {
-                        if m.is_dir() {
-                            dirs.push(e.path())
-                        } else {
-                            sum += m.len()
+async fn disk(path: std::path::PathBuf) -> Option<u64> {
+    static SLOT: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
+    let permit = SLOT.clone().try_acquire_owned().ok()?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut sum = 0;
+            let mut dirs = vec![path];
+            while let Some(p) = dirs.pop() {
+                if let Ok(es) = std::fs::read_dir(p) {
+                    for e in es.flatten() {
+                        if let Ok(m) = e.metadata() {
+                            if m.is_dir() {
+                                dirs.push(e.path())
+                            } else {
+                                sum += m.len()
+                            }
                         }
                     }
                 }
             }
-        }
-        sum
-    })
+            sum
+        }),
+    )
     .await
-    .unwrap_or(0)
+    .ok()?
+    .ok()
 }
 async fn stats(State(s): State<AppState>, Extension(u): Extension<User>) -> Result<Json<Value>> {
     admin(&s, &u).await?;
@@ -203,7 +224,7 @@ async fn stats(State(s): State<AppState>, Extension(u): Extension<User>) -> Resu
         sqlx::query_scalar("SELECT count(*) FROM tmdb_jobs WHERE completed_at IS NULL")
             .fetch_one(&s.pool)
             .await?;
-    let frames:i64=sqlx::query_scalar("SELECT count(*) FROM media_items WHERE poster_path LIKE '%/extracted/%' OR backdrop_path LIKE '%/extracted/%'").fetch_one(&s.pool).await?;
+    let frames:i64=sqlx::query_scalar("SELECT count(*) FROM media_items WHERE replace(poster_path,char(92),'/') LIKE '%/extracted/%' OR replace(backdrop_path,char(92),'/') LIKE '%/extracted/%'").fetch_one(&s.pool).await?;
     let sessions:Vec<(String,String,i64)>=sqlx::query_as("SELECT i.title,p.name,h.position_ticks FROM playback_history h JOIN media_items i ON i.id=h.media_item_id JOIN profiles p ON p.id=h.profile_id WHERE h.stopped=0 AND h.updated_at>unixepoch()-30").fetch_all(&s.pool).await?;
     let ff = tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -231,7 +252,17 @@ async fn stats(State(s): State<AppState>, Extension(u): Extension<User>) -> Resu
         .await
         .map(|m| m.len())
         .unwrap_or(0);
+    let workers: Vec<(String, String, i64, String, bool)> = sqlx::query_as(
+        "SELECT name,status,updated_at,details,requested FROM worker_status ORDER BY name",
+    )
+    .fetch_all(&s.pool)
+    .await?;
+    let scan = workers
+        .iter()
+        .find(|(name, _, _, _, _)| name == "scanner")
+        .and_then(|(_, _, _, details, _)| serde_json::from_str::<Value>(details).ok())
+        .unwrap_or_else(|| s.scan_status.lock().unwrap().clone());
     Ok(Json(
-        json!({"version":env!("CARGO_PKG_VERSION"),"rust_edition":"2024","architecture":std::env::consts::ARCH,"ffmpeg":ff,"uptime_seconds":s.started.elapsed().as_secs(),"db_bytes":db,"wal_bytes":wal,"artwork_bytes":disk(s.config.metadata_path.clone()).await,"media_count":count,"extracted_count":frames,"metadata_pending":pending,"scan":*s.scan_status.lock().await,"active_streams":sessions.iter().map(|(t,p,n)|json!({"title":t,"profile":p,"position_ticks":n})).collect::<Vec<_>>(),"logs":crate::diagnostics::recent()}),
+        json!({"version":env!("CARGO_PKG_VERSION"),"rust_edition":"2024","architecture":std::env::consts::ARCH,"ffmpeg":ff,"uptime_seconds":s.started.elapsed().as_secs(),"db_bytes":db,"wal_bytes":wal,"artwork_bytes":disk(s.config.metadata_path.clone()).await,"media_count":count,"extracted_count":frames,"metadata_pending":pending,"scan":scan,"workers":workers.iter().map(|(name,status,updated,_,requested)|json!({"name":name,"status":status,"updated_at":updated,"scan_requested":requested})).collect::<Vec<_>>(),"active_streams":sessions.iter().map(|(t,p,n)|json!({"title":t,"profile":p,"position_ticks":n})).collect::<Vec<_>>(),"logs":crate::diagnostics::recent()}),
     ))
 }

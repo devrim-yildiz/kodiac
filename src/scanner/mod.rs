@@ -38,6 +38,21 @@ pub struct ScanReport {
 #[error("scan already running")]
 pub struct ScanBusy;
 
+struct ScanStatusGuard<'a>(&'a std::sync::Mutex<Value>);
+impl Drop for ScanStatusGuard<'_> {
+    fn drop(&mut self) {
+        let mut status = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if status["running"] == true {
+            status["running"] = false.into();
+            status["complete"] = false.into();
+            status["phase"] = "Scan cancelled; previous catalog retained".into();
+        }
+    }
+}
+
 async fn bounded_read(path: &Path, maximum: u64) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     tokio::fs::File::open(path)
@@ -98,7 +113,41 @@ async fn probe(state: &AppState, path: &Path) -> anyhow::Result<Value> {
 /// # Errors
 /// Returns an error for overlapping scans, cancellation, unreadable directories or database failures.
 pub async fn scan(state: &AppState) -> anyhow::Result<ScanReport> {
-    let _guard = state.scan_lock.try_lock().map_err(|_| ScanBusy)?;
+    let guard = state
+        .scan_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| ScanBusy)?;
+    scan_locked(state, guard).await
+}
+
+pub(crate) async fn scan_locked(
+    state: &AppState,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+) -> anyhow::Result<ScanReport> {
+    *state.scan_status.lock().unwrap() =
+        serde_json::json!({"running":true,"indexed":0,"failed":0,"phase":"Indexing library"});
+    let _status_guard = ScanStatusGuard(&state.scan_status);
+    let result = tokio::select! {
+        _ = state.shutdown.cancelled() => Err(anyhow::anyhow!("scan cancelled")),
+        result = scan_library(state) => result,
+    };
+    let mut status = state.scan_status.lock().unwrap();
+    status["running"] = false.into();
+    match &result {
+        Ok(report) => {
+            *status = serde_json::json!({"running":false,"indexed":report.indexed,"failed":report.failed,"complete":report.complete,"phase":"Scan complete; artwork enrichment continues"});
+            crate::diagnostics::event("Library scan completed");
+        }
+        Err(_) => {
+            status["complete"] = false.into();
+            status["phase"] = "Scan failed; previous catalog retained".into();
+        }
+    }
+    result
+}
+
+async fn scan_library(state: &AppState) -> anyhow::Result<ScanReport> {
     let root = &state.config.media_path;
     let root_text = root
         .to_str()
@@ -119,12 +168,19 @@ pub async fn scan(state: &AppState) -> anyhow::Result<ScanReport> {
         ..Default::default()
     };
     while let Some(directory) = directories.pop() {
-        let mut entries = tokio::fs::read_dir(directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
+        let mut entries = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::fs::read_dir(directory),
+        )
+        .await??;
+        while let Some(entry) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), entries.next_entry()).await??
+        {
             if state.shutdown.is_cancelled() {
                 anyhow::bail!("scan cancelled");
             }
-            let kind = entry.file_type().await?;
+            let kind = tokio::time::timeout(std::time::Duration::from_secs(30), entry.file_type())
+                .await??;
             if kind.is_symlink() {
                 continue;
             }
@@ -153,10 +209,15 @@ pub async fn scan(state: &AppState) -> anyhow::Result<ScanReport> {
             {
                 continue;
             }
-            match index(state, &library_id, &generation, &path, &extension).await {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                index(state, &library_id, &generation, &path, &extension),
+            )
+            .await?
+            {
                 Ok(()) => {
                     report.indexed += 1;
-                    *state.scan_status.lock().await = serde_json::json!({"running":true,"indexed":report.indexed,"failed":report.failed,"phase":"Indexing library"});
+                    *state.scan_status.lock().unwrap() = serde_json::json!({"running":true,"indexed":report.indexed,"failed":report.failed,"phase":"Indexing library"});
                 }
                 Err(error) => {
                     report.failed += 1;
@@ -184,8 +245,6 @@ pub async fn scan(state: &AppState) -> anyhow::Result<ScanReport> {
         failed = report.failed,
         "scan finished"
     );
-    *state.scan_status.lock().await = serde_json::json!({"running":false,"indexed":report.indexed,"failed":report.failed,"phase":"Scan complete"});
-    crate::diagnostics::event("Library scan completed");
     Ok(report)
 }
 async fn index(
@@ -397,27 +456,36 @@ async fn index(
         .runtime
         .filter(|n| n.is_finite() && *n >= 0.0)
         .map(|n| n * 60.0));
+    let mut tx = state.pool.begin().await?;
     sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,plot,year,runtime_seconds,series_name,season,episode,poster_path,container,video_codec,audio_codec,streams_json,size_bytes,modified_ns,scan_generation,local_metadata,probe_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,2) ON CONFLICT(path) DO UPDATE SET library_id=excluded.library_id,kind=excluded.kind,title=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns THEN excluded.title ELSE media_items.title END,plot=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns THEN excluded.plot ELSE media_items.plot END,year=COALESCE(excluded.year,media_items.year),runtime_seconds=excluded.runtime_seconds,series_name=excluded.series_name,season=excluded.season,episode=excluded.episode,poster_path=COALESCE(excluded.poster_path,media_items.poster_path),container=excluded.container,video_codec=excluded.video_codec,audio_codec=excluded.audio_codec,streams_json=excluded.streams_json,size_bytes=excluded.size_bytes,modified_ns=excluded.modified_ns,scan_generation=excluded.scan_generation,available=1,local_metadata=excluded.local_metadata,probe_version=2")
         .bind(uuid::Uuid::new_v4().simple().to_string()).bind(library).bind(path_text)
         .bind(if metadata.episode.is_some() || metadata.showtitle.is_some() { "episode" } else { "movie" })
         .bind(title).bind(metadata.plot).bind(metadata.year).bind(runtime).bind(metadata.showtitle).bind(metadata.season).bind(metadata.episode)
-        .bind(poster).bind(extension).bind(codec("video")).bind(codec("audio")).bind(streams.to_string()).bind(size).bind(modified).bind(generation).bind(has_nfo).execute(&state.pool).await?;
+        .bind(poster).bind(extension).bind(codec("video")).bind(codec("audio")).bind(streams.to_string()).bind(size).bind(modified).bind(generation).bind(has_nfo).execute(&mut *tx).await?;
     sqlx::query("UPDATE media_items SET backdrop_path=COALESCE(?,backdrop_path) WHERE path=?")
         .bind(backdrop)
         .bind(path_text)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     let id: String = sqlx::query_scalar("SELECT id FROM media_items WHERE path=?")
         .bind(path_text)
-        .fetch_one(&state.pool)
+        .fetch_one(&mut *tx)
         .await?;
     if !genres.is_empty() {
         sqlx::query("UPDATE movies SET genres_json=? WHERE id=?")
             .bind(serde_json::to_string(&genres)?)
             .bind(&id)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE shows SET genres_json=? WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(serde_json::to_string(&genres)?).bind(&id).execute(&state.pool).await?;
+        sqlx::query("UPDATE shows SET genres_json=? WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(serde_json::to_string(&genres)?).bind(&id).execute(&mut *tx).await?;
+    }
+    if has_nfo {
+        sqlx::query("DELETE FROM item_people WHERE item_id=? AND role IN ('Actor','Director')")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM collection_movies WHERE movie_id=? AND collection_id IN (SELECT id FROM collections WHERE id LIKE 'nfo:%')")
+            .bind(&id).execute(&mut *tx).await?;
     }
     if let Some(name) = collection {
         use sha2::{Digest, Sha256};
@@ -425,14 +493,14 @@ async fn index(
         sqlx::query("INSERT OR IGNORE INTO collections(id,title) VALUES(?,?)")
             .bind(&cid)
             .bind(name)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT OR IGNORE INTO collection_movies(collection_id,movie_id) SELECT ?,id FROM movies WHERE id=?").bind(cid).bind(&id).execute(&state.pool).await?;
+        sqlx::query("INSERT OR IGNORE INTO collection_movies(collection_id,movie_id) SELECT ?,id FROM movies WHERE id=?").bind(cid).bind(&id).execute(&mut *tx).await?;
     }
     sqlx::query("UPDATE media_items SET chapters_json=? WHERE id=?")
         .bind(chapters)
         .bind(&id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     for (name, role) in credits {
         if name.trim().is_empty() {
@@ -440,19 +508,20 @@ async fn index(
         }
         sqlx::query("INSERT OR IGNORE INTO people(name) VALUES(?)")
             .bind(&name)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT OR IGNORE INTO item_people(item_id,name,role) VALUES(?,?,?)")
             .bind(&id)
             .bind(name)
             .bind(role)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
     }
     sqlx::query("UPDATE media_items SET rating=COALESCE(?,rating) WHERE id=?")
         .bind(rating)
         .bind(&id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }

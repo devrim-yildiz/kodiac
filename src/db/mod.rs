@@ -49,6 +49,9 @@ pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
+        .collation("jellyfin_name", |a, b| {
+            a.to_lowercase().cmp(&b.to_lowercase())
+        })
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

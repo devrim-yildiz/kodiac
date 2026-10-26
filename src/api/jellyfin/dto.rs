@@ -19,7 +19,7 @@ pub struct ItemsResponse {
 pub fn user(user: &User, server: &str) -> Value {
     json!({"Id":user.id,"Name":user.username,"ServerId":server,"HasPassword":true,"HasConfiguredPassword":true,"HasConfiguredEasyPassword":false,
         "Configuration":{"AudioLanguagePreference":"","PlayDefaultAudioTrack":true,"SubtitleMode":"Default","EnableNextEpisodeAutoPlay":true},
-        "Policy":{"IsAdministrator":true,"IsHidden":false,"IsDisabled":false,"EnableMediaPlayback":true,"EnableVideoPlaybackTranscoding":true,"EnableAudioPlaybackTranscoding":true,"EnablePlaybackRemuxing":true,"EnableAllFolders":true,"EnableContentDownloading":true,"EnableSyncTranscoding":false}})
+        "Policy":{"IsAdministrator":user.is_admin,"IsHidden":false,"IsDisabled":false,"EnableMediaPlayback":true,"EnableVideoPlaybackTranscoding":true,"EnableAudioPlaybackTranscoding":true,"EnablePlaybackRemuxing":true,"EnableAllFolders":true,"EnableContentDownloading":true,"EnableSyncTranscoding":false}})
 }
 fn video_range(stream: &Value) -> &'static str {
     match stream["color_transfer"].as_str() {
@@ -48,8 +48,8 @@ pub fn source(item: &MediaItem) -> Value {
         "IsRemote":false,"RequiresOpening":false,"RequiresClosing":false,"MediaStreams":streams,
         "DefaultAudioStreamIndex":raw.iter().find(|s|s["codec_type"]=="audio").map(|s|s["index"].clone())})
 }
-/// Project one media item with server identity and persisted resume ticks.
-pub fn item(item: &MediaItem, server: &str, position: i64) -> Value {
+/// Project one media item with server identity, resume ticks and completion state.
+pub fn item(item: &MediaItem, server: &str, position: i64, completed: bool) -> Value {
     json!({"Id":item.id,"ServerId":server,"Name":item.title,"Overview":item.plot,"ProductionYear":item.year,
         "Type":if item.kind=="episode" {"Episode"} else {"Movie"},"MediaType":"Video","IsFolder":false,
         "Container":item.container,"VideoType":"VideoFile","LocationType":"FileSystem",
@@ -59,7 +59,7 @@ pub fn item(item: &MediaItem, server: &str, position: i64) -> Value {
         "ParentId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))).unwrap_or_else(||super::navigation::MOVIES.into()),
         "SeriesId":item.series_name.as_ref().map(|n|super::navigation::series_id(n)),
         "SeasonId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))),
-        "BackdropImageTags":if item.backdrop_path.is_some() {json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":position,"PlayCount":0,"IsFavorite":false,"Played":false,"Key":item.id}})
+        "BackdropImageTags":if item.backdrop_path.is_some() {json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":position,"PlayCount":i32::from(completed),"IsFavorite":false,"Played":completed,"Key":item.id}})
 }
 
 #[cfg(test)]
@@ -90,6 +90,7 @@ mod tests {
             &User {
                 id: "user".into(),
                 username: "admin".into(),
+                is_admin: true,
             },
             "server",
         );
