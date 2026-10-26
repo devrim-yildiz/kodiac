@@ -187,13 +187,31 @@ export default function ShowPage({
                 <div className="episode-copy">
                   <div className="episode-topline">
                     <span className="eyebrow">
-                      {episodeCode(season?.season_number, item.episode_number)}
+                      {episodeCode(
+                        season?.season_number,
+                        item.episode_number,
+                        item.episode_label,
+                      )}
                     </span>
+                    {item.matched_season != null &&
+                      season?.season_number == null && (
+                        <span>
+                          TMDB{" "}
+                          {episodeCode(
+                            item.matched_season,
+                            item.matched_episode,
+                          )}
+                        </span>
+                      )}
                     <span>{runtime(item.runtime_seconds)}</span>
                   </div>
                   <h3>
-                    {episodeCode(season?.season_number, item.episode_number)} ·{" "}
-                    {item.title}
+                    {episodeCode(
+                      season?.season_number,
+                      item.episode_number,
+                      item.episode_label,
+                    )}{" "}
+                    · {item.title}
                   </h3>
                   <p>{item.overview || "No episode synopsis available yet."}</p>
                 </div>

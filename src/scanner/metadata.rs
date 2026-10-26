@@ -124,6 +124,10 @@ pub struct Enrichment {
     pub season_poster: Option<String>,
     /// Remote movie collection data, if available.
     pub collection: Option<Value>,
+    /// Verified remote numbering; the source's absolute numbering remains unchanged.
+    pub matched_episode: Option<(i64, i64)>,
+    /// Animation produced in Japan; explicit local classification also remains valid.
+    pub is_anime: bool,
 }
 
 /// Resolve a filename hint to TMDB metadata and download bounded cached artwork.
@@ -131,6 +135,7 @@ pub async fn fetch(
     state: &AppState,
     scene: &Scene,
     is_tv: bool,
+    known_id: Option<i64>,
 ) -> anyhow::Result<Option<Enrichment>> {
     if state.config.tmdb_token.as_deref().is_none_or(str::is_empty) {
         return Ok(None);
@@ -150,39 +155,81 @@ pub async fn fetch(
             year.to_string(),
         ));
     }
-    let search = get(state, &format!("search/{kind}"), &query).await?;
-    // Avoid silently assigning an unrelated first search result.
-    let normalized = |s: &str| {
-        s.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect::<String>()
-    };
-    let Some(found) = search["results"].as_array().and_then(|rows| {
-        rows.iter().find(|r| {
-            ["title", "name", "original_title", "original_name"]
-                .iter()
-                .any(|k| {
-                    r[k].as_str()
-                        .is_some_and(|s| normalized(s) == normalized(&scene.title))
+    let id = if let Some(id) = known_id.filter(|id| *id > 0) {
+        u64::try_from(id)?
+    } else {
+        let search = get(state, &format!("search/{kind}"), &query).await?;
+        // Avoid silently assigning an unrelated first search result.
+        let normalized = |s: &str| {
+            s.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .map(|c| match c {
+                    'é' | 'è' | 'ê' | 'ë' => 'e',
+                    'á' | 'à' | 'â' | 'ä' => 'a',
+                    'ó' | 'ò' | 'ô' | 'ö' => 'o',
+                    'í' | 'ì' | 'î' | 'ï' => 'i',
+                    'ú' | 'ù' | 'û' | 'ü' => 'u',
+                    _ => c,
                 })
-        })
-    }) else {
-        return Ok(None);
+                .collect::<String>()
+        };
+        let Some(found) = search["results"].as_array().and_then(|rows| {
+            rows.iter().find(|r| {
+                ["title", "name", "original_title", "original_name"]
+                    .iter()
+                    .any(|k| {
+                        r[k].as_str()
+                            .is_some_and(|s| normalized(s) == normalized(&scene.title))
+                    })
+            })
+        }) else {
+            return Ok(None);
+        };
+        found["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("TMDB missing id"))?
     };
-    let id = found["id"]
-        .as_u64()
-        .ok_or_else(|| anyhow::anyhow!("TMDB missing id"))?;
     let details = get(
         state,
         &format!("{kind}/{id}"),
         &[("append_to_response", "credits,videos".into())],
     )
     .await?;
-    let episode = if let (Some(season), Some(episode)) = (
-        scene.season.filter(|n| *n >= 0),
-        scene.episode.filter(|n| *n >= 0),
-    ) {
+    let mut target = scene
+        .season
+        .zip(scene.episode)
+        .filter(|(s, e)| *s >= 0 && *e >= 0);
+    if is_tv
+        && scene.season.is_none()
+        && scene.episode_end.is_none()
+        && scene
+            .episode_label
+            .as_ref()
+            .is_none_or(|label| !label.contains('.'))
+        && let Some(absolute) = scene.episode.filter(|n| *n > 0)
+    {
+        let groups = get(state, &format!("tv/{id}/episode_groups"), &[]).await?;
+        let absolute_groups: Vec<_> = groups["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|g| g["type"] == 2)
+            .collect();
+        // Multiple alternative absolute orders require a user's choice; never guess between them.
+        if absolute_groups.len() == 1
+            && let Some(group) = absolute_groups[0]["id"].as_str().filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+        {
+            let group = get(state, &format!("tv/episode_group/{group}"), &[]).await?;
+            target = absolute_target(&group, absolute);
+        }
+    }
+    let episode = if let Some((season, episode)) = target {
         Some(
             get(
                 state,
@@ -225,7 +272,7 @@ pub async fn fetch(
     };
     let mut season_overview = String::new();
     let season_poster = if kind == "tv" {
-        if let Some(number) = scene.season.filter(|n| *n >= 0) {
+        if let Some(number) = target.map(|(s, _)| s) {
             let season = get(state, &format!("tv/{id}/season/{number}"), &[]).await?;
             season_overview = season["overview"].as_str().unwrap_or("").into();
             image(state, &season["poster_path"]).await?
@@ -265,6 +312,16 @@ pub async fn fetch(
         })
         .map(str::to_owned);
     Ok(Some(Enrichment {
+        matched_episode: target,
+        is_anime: details["genres"]
+            .as_array()
+            .is_some_and(|g| g.iter().any(|g| g["id"] == 16))
+            && (details["origin_country"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|c| c == "JP"))
+                || details["production_countries"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|c| c["iso_3166_1"] == "JP"))),
         people,
         rating: details["vote_average"].as_f64().filter(|n| *n > 0.0),
         trailer_key,
@@ -287,4 +344,60 @@ pub async fn fetch(
             .filter(|v| v.is_object())
             .cloned(),
     }))
+}
+
+/// Map a positive absolute index through one explicit TMDB absolute episode order.
+fn absolute_target(group: &Value, absolute: i64) -> Option<(i64, i64)> {
+    if group["type"] != 2 || absolute <= 0 {
+        return None;
+    }
+    let mut groups: Vec<_> = group["groups"].as_array()?.iter().collect();
+    groups.sort_by_key(|g| g["order"].as_i64());
+    let mut episodes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut group_orders = std::collections::HashSet::new();
+    for g in groups {
+        if !group_orders.insert(g["order"].as_i64()?) {
+            return None;
+        }
+        let mut rows: Vec<_> = g["episodes"].as_array()?.iter().collect();
+        rows.sort_by_key(|e| e["order"].as_i64());
+        let mut episode_orders = std::collections::HashSet::new();
+        for e in rows {
+            if !episode_orders.insert(e["order"].as_i64()?) {
+                return None;
+            }
+            let key = (e["season_number"].as_i64()?, e["episode_number"].as_i64()?);
+            if key.0 < 0 || key.1 <= 0 || !seen.insert(key) {
+                return None;
+            }
+            episodes.push(key);
+        }
+    }
+    if group["episode_count"]
+        .as_u64()
+        .is_some_and(|count| count != episodes.len() as u64)
+    {
+        return None;
+    }
+    episodes.get(usize::try_from(absolute - 1).ok()?).copied()
+}
+#[cfg(test)]
+mod absolute_tests {
+    use super::*;
+    #[test]
+    fn explicit_absolute_order_preserves_canonical_numbers() {
+        let group = serde_json::json!({"type":2,"groups":[{"order":0,"episodes":[{"order":1,"season_number":2,"episode_number":1},{"order":0,"season_number":1,"episode_number":24}]}]});
+        assert_eq!(absolute_target(&group, 1), Some((1, 24)));
+        assert_eq!(absolute_target(&group, 2), Some((2, 1)));
+        assert_eq!(absolute_target(&group, 3), None);
+        assert_eq!(absolute_target(&group, 0), None);
+        let mut ambiguous = group.clone();
+        ambiguous["groups"][0]["episodes"][0]["order"] = serde_json::json!(0);
+        assert_eq!(absolute_target(&ambiguous, 1), None);
+        assert_eq!(
+            absolute_target(&serde_json::json!({"type":1,"groups":[]}), 1),
+            None
+        );
+    }
 }

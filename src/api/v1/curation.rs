@@ -19,7 +19,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/search", get(search))
         .route("/api/v1/people/{name}", get(person))
 }
-const PROJECTION: &str = "json_object('id',t.id,'kind',t.kind,'title',t.title,'overview',t.overview,'year',t.year,'rating',t.rating,'stream_facts',json(t.streams_json),'runtime_seconds',t.runtime_seconds,'poster_url',t.poster_url,'backdrop_url',t.backdrop_url,'genres',json(t.genres_json),'show_id',t.show_id,'show_title',t.show_title,'season_id',t.season_id,'season_number',t.season_number,'episode_number',t.episode_number,'season_count',t.season_count,'episode_count',t.episode_count)";
+const PROJECTION: &str = "json_object('is_anime',json(CASE WHEN COALESCE((SELECT i.is_anime FROM media_items i WHERE i.id=t.id),(SELECT max(ai.is_anime) FROM episodes ae JOIN seasons ase ON ase.id=ae.season_id JOIN media_items ai ON ai.id=ae.id WHERE ase.show_id=t.id AND ai.available=1),0)=1 THEN 'true' ELSE 'false' END),'episode_end',(SELECT i.episode_end FROM media_items i WHERE i.id=t.id),'episode_label',(SELECT i.episode_label FROM media_items i WHERE i.id=t.id),'id',t.id,'kind',t.kind,'title',t.title,'overview',t.overview,'year',t.year,'rating',t.rating,'stream_facts',json(t.streams_json),'runtime_seconds',t.runtime_seconds,'poster_url',t.poster_url,'backdrop_url',t.backdrop_url,'genres',json(t.genres_json),'show_id',t.show_id,'show_title',t.show_title,'season_id',t.season_id,'season_number',t.season_number,'episode_number',t.episode_number,'season_count',t.season_count,'episode_count',t.episode_count)";
 /// Project catalog titles using an internal SQL predicate and one bound argument.
 ///
 /// The filter is trusted SQL supplied by server code; never pass user input as the predicate.

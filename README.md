@@ -143,3 +143,42 @@ cargo doc --no-deps --open
 
 Kodiac is licensed under the GNU General Public License v3.0 only.
 See [LICENSE](LICENSE) and [third-party notices](NOTICE).
+
+### Anime libraries
+
+The Anime tab includes films and shows, with the existing search, details,
+profiles, resume, audio/subtitle selection and next-episode playback. Jellyfin
+clients also receive a mixed Anime library. Movies and Series remain available.
+Anime is identified from an `Anime` directory (case insensitive), explicit anime
+release markers, local NFO `Anime` genres, or TMDB animation produced in Japan.
+Animation alone does not classify a title as anime.
+
+The scanner supports:
+
+- `S01E02`, `S01.E02`, `E394`, `Ep.17` and fansub releases such as
+  `[Group] Frieren - 028v2 [1080p] [CRC].mkv`.
+- Bare episode files such as `Show/Season 2/03.mkv`, with `Season`, `Staffel`
+  and `S02` directories; release-prefixed filenames use the show directory.
+- Combined episodes (`E02-03`, `S01E02E03`), fractional episodes (`E12.5`),
+  and numbered or unnumbered OVA/ONA/OAD/Special/OP/ED extras.
+- Episode/movie NFO metadata and inherited `tvshow.nfo`, including explicit
+  TMDB IDs and show artwork. Explicit movie NFOs prevent numbered movie titles
+  becoming episodes. Samples and trailer sidecars are excluded.
+
+Absolute numbers remain distinct from specials and retain their source labels.
+With a configured TMDB key, one explicit TMDB Absolute episode group can match
+those numbers to canonical season/episode metadata. The verified match appears
+beside the source number; missing or ambiguous orders remain unassigned. Ranges
+and fractional episodes retain their original numbering. No season totals are
+summed to guess an order.
+
+Migration 0007 adds classification and numbering fields without replacing media
+IDs or playback rows. On the first startup, existing anime filename hints are
+reclassified in one transaction without reading media files. Local NFO values
+are preserved; samples are hidden, and movie collection links move to their
+corresponding show when an item becomes an episode. The operation is idempotent.
+Back up the database before upgrading; older binaries require their matching
+pre-upgrade snapshot. A regular scan recognizes new files and local NFO changes.
+
+AniList/MyAnimeList account synchronization and download automation are separate
+services and are not included.

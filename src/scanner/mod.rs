@@ -185,6 +185,13 @@ async fn scan_library(state: &AppState) -> anyhow::Result<ScanReport> {
                 continue;
             }
             if kind.is_dir() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("sample"))
+                {
+                    continue;
+                }
                 directories.push(entry.path());
                 continue;
             }
@@ -201,6 +208,9 @@ async fn scan_library(state: &AppState) -> anyhow::Result<ScanReport> {
                 extension.as_str(),
                 "mp4" | "mkv" | "m4v" | "mov" | "avi" | "webm" | "ts" | "m2ts"
             ) {
+                continue;
+            }
+            if scene::is_anime(&path) && scene::is_extra(&path) {
                 continue;
             }
             if path
@@ -295,19 +305,52 @@ async fn index(
     } else {
         nfo::Nfo::default()
     };
-    let scene = scene::parse(
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .as_ref(),
-    );
+    let movie_tmdb = metadata.is_movie.then(|| metadata.tmdb_id()).flatten();
+    let mut show_tmdb = None;
+    let has_episode_nfo = metadata.episode.is_some();
+    let is_anime = scene::is_anime(&path)
+        || metadata
+            .genre
+            .iter()
+            .any(|g| g.eq_ignore_ascii_case("anime"));
+    let scene = if is_anime {
+        scene::parse_anime_path(&path)
+    } else {
+        scene::parse(&path.file_name().unwrap_or_default().to_string_lossy())
+    };
     let mut poster = None;
     let mut backdrop = None;
-    metadata.season = metadata.season.or(scene.season);
-    metadata.episode = metadata.episode.or(scene.episode);
+    if !metadata.is_movie {
+        metadata.season = metadata.season.or(scene.season);
+        metadata.episode = metadata.episode.or(scene.episode);
+        if metadata.showtitle.is_none() && (metadata.episode.is_some() || scene.season == Some(0)) {
+            metadata.showtitle = Some(scene.title.clone());
+        }
+    }
     metadata.year = metadata.year.or(scene.year);
-    if metadata.episode.is_some() && metadata.showtitle.is_none() {
-        metadata.showtitle = Some(scene.title.clone());
+    // Show NFO/artwork may live above season and release directories.
+    let mut show_parent = None;
+    if is_anime && !metadata.is_movie {
+        for ancestor in parent.ancestors().take_while(|p| p.starts_with(root)) {
+            if let Some(file) = local_file(root, ancestor.join("tvshow.nfo")).await {
+                if let Ok(show) = bounded_read(&file, 2 * 1024 * 1024)
+                    .await
+                    .and_then(|bytes| nfo::parse(std::str::from_utf8(&bytes)?))
+                {
+                    show_tmdb = show.tmdb_id();
+                    if !show.title.trim().is_empty() {
+                        metadata.showtitle = Some(show.title);
+                        metadata.year = metadata.year.or(show.year);
+                        if metadata.genre.is_empty() {
+                            metadata.genre = show.genre;
+                        }
+                        has_nfo = true;
+                    }
+                }
+                show_parent = Some(ancestor);
+                break;
+            }
+        }
     }
     for candidate in [
         parent.join("fanart.jpg"),
@@ -331,6 +374,18 @@ async fn index(
         if let Some(candidate) = local_file(root, candidate).await {
             poster = Some(candidate.to_string_lossy().into_owned());
             break;
+        }
+    }
+    if let Some(show_parent) = show_parent {
+        if poster.is_none() {
+            poster = local_file(root, show_parent.join("poster.jpg"))
+                .await
+                .map(|p| p.to_string_lossy().into_owned());
+        }
+        if backdrop.is_none() {
+            backdrop = local_file(root, show_parent.join("fanart.jpg"))
+                .await
+                .map(|p| p.to_string_lossy().into_owned());
         }
     }
     let existing: Option<(String, Option<f64>, String, i64, String)> = sqlx::query_as("SELECT streams_json,runtime_seconds,modified_ns,probe_version,chapters_json FROM media_items WHERE path=? AND size_bytes=?")
@@ -444,8 +499,20 @@ async fn index(
         .set
         .and_then(|x| (!x.name.trim().is_empty()).then_some(x.name));
     let title = if metadata.title.trim().is_empty() {
-        if let (Some(season), Some(episode)) = (scene.season, scene.episode) {
+        if let (Some(season), Some(episode)) = (metadata.season, metadata.episode) {
             format!("{} S{season:02}E{episode:02}", scene.title)
+        } else if let Some(episode) = metadata.episode {
+            format!(
+                "{} E{}",
+                scene.title,
+                scene
+                    .episode_label
+                    .as_deref()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{episode:02}"))
+            )
+        } else if metadata.season == Some(0) {
+            scene::parse(&path.file_name().unwrap_or_default().to_string_lossy()).title
         } else {
             scene.title
         }
@@ -457,7 +524,9 @@ async fn index(
         .filter(|n| n.is_finite() && *n >= 0.0)
         .map(|n| n * 60.0));
     let mut tx = state.pool.begin().await?;
-    sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,plot,year,runtime_seconds,series_name,season,episode,poster_path,container,video_codec,audio_codec,streams_json,size_bytes,modified_ns,scan_generation,local_metadata,probe_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,2) ON CONFLICT(path) DO UPDATE SET library_id=excluded.library_id,kind=excluded.kind,title=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns THEN excluded.title ELSE media_items.title END,plot=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns THEN excluded.plot ELSE media_items.plot END,year=COALESCE(excluded.year,media_items.year),runtime_seconds=excluded.runtime_seconds,series_name=excluded.series_name,season=excluded.season,episode=excluded.episode,poster_path=COALESCE(excluded.poster_path,media_items.poster_path),container=excluded.container,video_codec=excluded.video_codec,audio_codec=excluded.audio_codec,streams_json=excluded.streams_json,size_bytes=excluded.size_bytes,modified_ns=excluded.modified_ns,scan_generation=excluded.scan_generation,available=1,local_metadata=excluded.local_metadata,probe_version=2")
+    let previous_collections: Vec<String> = sqlx::query_scalar("SELECT cm.collection_id FROM collection_movies cm JOIN media_items i ON i.id=cm.movie_id WHERE i.path=?")
+        .bind(path_text).fetch_all(&mut *tx).await?;
+    sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,plot,year,runtime_seconds,series_name,season,episode,poster_path,container,video_codec,audio_codec,streams_json,size_bytes,modified_ns,scan_generation,local_metadata,probe_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,2) ON CONFLICT(path) DO UPDATE SET library_id=excluded.library_id,kind=excluded.kind,title=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns OR media_items.kind<>excluded.kind OR COALESCE(media_items.series_name,'')<>COALESCE(excluded.series_name,'') THEN excluded.title ELSE media_items.title END,plot=CASE WHEN excluded.local_metadata=1 OR media_items.modified_ns<>excluded.modified_ns THEN excluded.plot ELSE media_items.plot END,year=COALESCE(excluded.year,media_items.year),runtime_seconds=excluded.runtime_seconds,series_name=excluded.series_name,season=excluded.season,episode=excluded.episode,poster_path=COALESCE(excluded.poster_path,media_items.poster_path),container=excluded.container,video_codec=excluded.video_codec,audio_codec=excluded.audio_codec,streams_json=excluded.streams_json,size_bytes=excluded.size_bytes,modified_ns=excluded.modified_ns,scan_generation=excluded.scan_generation,available=1,local_metadata=excluded.local_metadata,probe_version=2")
         .bind(uuid::Uuid::new_v4().simple().to_string()).bind(library).bind(path_text)
         .bind(if metadata.episode.is_some() || metadata.showtitle.is_some() { "episode" } else { "movie" })
         .bind(title).bind(metadata.plot).bind(metadata.year).bind(runtime).bind(metadata.showtitle).bind(metadata.season).bind(metadata.episode)
@@ -467,10 +536,37 @@ async fn index(
         .bind(path_text)
         .execute(&mut *tx)
         .await?;
+    sqlx::query("UPDATE media_items SET is_anime=MAX(is_anime,?),episode_end=?,episode_label=? WHERE path=?")
+        .bind(is_anime)
+        .bind(if metadata.is_movie || has_episode_nfo {
+            None
+        } else {
+            scene.episode_end
+        })
+        .bind(if metadata.is_movie || has_episode_nfo {
+            None
+        } else {
+            scene.episode_label.as_deref()
+        })
+        .bind(path_text)
+        .execute(&mut *tx)
+        .await?;
     let id: String = sqlx::query_scalar("SELECT id FROM media_items WHERE path=?")
         .bind(path_text)
         .fetch_one(&mut *tx)
         .await?;
+    sqlx::query("INSERT OR IGNORE INTO collection_shows(collection_id,show_id) SELECT value,se.show_id FROM json_each(?) JOIN episodes e ON e.id=? JOIN seasons se ON se.id=e.season_id")
+        .bind(serde_json::to_string(&previous_collections)?).bind(&id).execute(&mut *tx).await?;
+    if let Some(tmdb) = movie_tmdb {
+        sqlx::query("UPDATE movies SET tmdb_id=? WHERE id=?")
+            .bind(tmdb)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(tmdb) = show_tmdb {
+        sqlx::query("UPDATE shows SET tmdb_id=? WHERE id=(SELECT se.show_id FROM episodes e JOIN seasons se ON se.id=e.season_id WHERE e.id=?)").bind(tmdb).bind(&id).execute(&mut *tx).await?;
+    }
     if !genres.is_empty() {
         sqlx::query("UPDATE movies SET genres_json=? WHERE id=?")
             .bind(serde_json::to_string(&genres)?)
@@ -522,6 +618,74 @@ async fn index(
         .bind(&id)
         .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Reclassify existing filename hints once without reading media or replacing IDs/progress.
+/// Explicit local NFO metadata is retained; all updates and the version marker are atomic.
+pub async fn reclassify_anime(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    if sqlx::query(
+        "INSERT OR IGNORE INTO settings(key,value) VALUES('anime_detection_v2','complete')",
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 0
+    {
+        tx.commit().await?;
+        return Ok(());
+    }
+    let rows: Vec<(String, String, bool)> =
+        sqlx::query_as("SELECT id,path,local_metadata FROM media_items WHERE available=1")
+            .fetch_all(&mut *tx)
+            .await?;
+    for (id, path, local) in rows {
+        let path = std::path::Path::new(&path);
+        if !scene::is_anime(path) {
+            continue;
+        }
+        sqlx::query("UPDATE media_items SET is_anime=1 WHERE id=?")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        if scene::is_extra(path) {
+            sqlx::query("UPDATE media_items SET available=0 WHERE id=?")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            continue;
+        }
+        if local {
+            continue;
+        }
+        let hint = scene::parse_anime_path(path);
+        if hint.episode.is_some() || hint.season == Some(0) {
+            let previous_collections: Vec<String> =
+                sqlx::query_scalar("SELECT collection_id FROM collection_movies WHERE movie_id=?")
+                    .bind(&id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            let label = hint
+                .episode_label
+                .clone()
+                .or_else(|| hint.episode.map(|n| format!("{n:02}")));
+            let title = label.as_ref().map_or_else(
+                || {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                },
+                |n| format!("{} E{n}", hint.title),
+            );
+            sqlx::query("UPDATE media_items SET title=CASE WHEN kind='episode' THEN title ELSE ? END,kind='episode',series_name=?,season=?,episode=?,episode_end=?,episode_label=? WHERE id=?")
+                .bind(title).bind(hint.title).bind(hint.season).bind(hint.episode).bind(hint.episode_end).bind(hint.episode_label).bind(&id).execute(&mut *tx).await?;
+            sqlx::query("INSERT OR IGNORE INTO collection_shows(collection_id,show_id) SELECT value,se.show_id FROM json_each(?) JOIN episodes e ON e.id=? JOIN seasons se ON se.id=e.season_id")
+                .bind(serde_json::to_string(&previous_collections)?).bind(&id).execute(&mut *tx).await?;
+        }
+    }
     tx.commit().await?;
     Ok(())
 }

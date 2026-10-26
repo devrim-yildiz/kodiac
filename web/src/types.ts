@@ -6,6 +6,7 @@ export interface Title {
   id: string;
   title: string;
   kind: "movie" | "show" | "episode";
+  is_anime?: boolean;
   rating?: number | null;
   quality?: string[];
   overview?: string;
@@ -20,6 +21,10 @@ export interface Title {
   genres?: Genre[];
   season_id?: string;
   episode_number?: number | null;
+  episode_end?: number | null;
+  matched_season?: number | null;
+  matched_episode?: number | null;
+  episode_label?: string | null;
   season_number?: number | null;
   series_name?: string | null;
   show_id?: string | null;
@@ -89,8 +94,16 @@ export const runtime = (seconds?: number | null) =>
   !seconds || seconds <= 0
     ? ""
     : `${Math.floor(seconds / 3600) ? `${Math.floor(seconds / 3600)}h ` : ""}${Math.round((seconds % 3600) / 60)}m`;
-export const episodeCode = (season?: number | null, episode?: number | null) =>
+export const episodeCode = (
+  season?: number | null,
+  episode?: number | null,
+  label?: string | null,
+) =>
   [
     season != null ? `S${String(season).padStart(2, "0")}` : "",
-    episode != null ? `E${String(episode).padStart(2, "0")}` : "",
+    label
+      ? `E${label}`
+      : episode != null
+        ? `E${String(episode).padStart(2, "0")}`
+        : "",
   ].join("");

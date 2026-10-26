@@ -311,6 +311,9 @@ mod tests {
     #[test]
     fn conversion_checks_output_constraints_for_http_and_hls() {
         let item = MediaItem {
+            is_anime: false,
+            episode_end: None,
+            episode_label: None,
             id:"item".into(),library_id:"lib".into(),path:"/movie.mkv".into(),kind:"movie".into(),
             title:"Movie".into(),plot:String::new(),year:None,runtime_seconds:Some(120.0),series_name:None,
             season:None,episode:None,poster_path:None,backdrop_path:None,container:"mkv".into(),

@@ -54,11 +54,11 @@ pub fn item(item: &MediaItem, server: &str, position: i64, completed: bool) -> V
         "Type":if item.kind=="episode" {"Episode"} else {"Movie"},"MediaType":"Video","IsFolder":false,
         "Container":item.container,"VideoType":"VideoFile","LocationType":"FileSystem",
         "RunTimeTicks":item.runtime_seconds.map(|n|(n*10_000_000.0) as i64),"SeriesName":item.series_name,
-        "ParentIndexNumber":item.season,"IndexNumber":item.episode,"MediaSources":[source(item)],
+        "ParentIndexNumber":item.season,"IndexNumber":item.episode,"IndexNumberEnd":item.episode_end,"MediaSources":[source(item)],
         "ImageTags":if item.poster_path.is_some() {json!({"Primary":item.id})} else {json!({})},
-        "ParentId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))).unwrap_or_else(||super::navigation::MOVIES.into()),
+        "ParentId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(-1))).unwrap_or_else(||super::navigation::MOVIES.into()),
         "SeriesId":item.series_name.as_ref().map(|n|super::navigation::series_id(n)),
-        "SeasonId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(0))),
+        "SeasonId":item.series_name.as_ref().map(|n|super::navigation::season_id(n,item.season.unwrap_or(-1))),
         "BackdropImageTags":if item.backdrop_path.is_some() {json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":position,"PlayCount":i32::from(completed),"IsFavorite":false,"Played":completed,"Key":item.id}})
 }
 

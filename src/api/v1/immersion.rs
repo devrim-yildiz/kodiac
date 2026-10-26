@@ -39,7 +39,7 @@ async fn experience(State(s): State<AppState>, Path(id): Path<String>) -> Result
             .bind(&id)
             .fetch_one(&s.pool)
             .await?;
-    let next=super::curation::titles(&s,"kind='episode' AND id=(SELECT e2.id FROM episodes e JOIN seasons se ON se.id=e.season_id JOIN seasons se2 ON se2.show_id=se.show_id JOIN episodes e2 ON e2.season_id=se2.id JOIN media_items i ON i.id=e2.id WHERE e.id=? AND i.available=1 AND (se2.season_number>se.season_number OR (se2.season_number=se.season_number AND e2.episode_number>e.episode_number)) ORDER BY se2.season_number,e2.episode_number,e2.id LIMIT 1)",&id).await?.into_iter().next();
+    let next=super::curation::titles(&s,"kind='episode' AND id=(SELECT e2.id FROM episodes e JOIN seasons se ON se.id=e.season_id JOIN seasons se2 ON se2.show_id=se.show_id JOIN episodes e2 ON e2.season_id=se2.id JOIN media_items i ON i.id=e2.id JOIN media_items current ON current.id=e.id WHERE e.id=? AND i.available=1 AND (se2.season_number>se.season_number OR (se2.season_number=se.season_number AND CAST(COALESCE(i.episode_label,e2.episode_number) AS REAL)>COALESCE(current.episode_end,CAST(COALESCE(current.episode_label,e.episode_number) AS REAL)))) ORDER BY se2.season_number,CAST(COALESCE(i.episode_label,e2.episode_number) AS REAL),e2.id LIMIT 1)",&id).await?.into_iter().next();
     let people: Vec<(String, String)> =
         sqlx::query_as("SELECT name,role FROM item_people WHERE item_id=? ORDER BY role,name")
             .bind(&id)

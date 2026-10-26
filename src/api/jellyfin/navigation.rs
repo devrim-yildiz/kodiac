@@ -14,6 +14,8 @@ use std::collections::HashMap;
 pub const MOVIES: &str = "00000000000000000000000000000001";
 /// Stable identifier of the virtual Series library view.
 pub const SERIES: &str = "00000000000000000000000000000002";
+/// Stable identifier of the mixed Anime library view.
+pub const ANIME: &str = "00000000000000000000000000000003";
 /// Derive a stable virtual series identifier from its name.
 pub fn series_id(name: &str) -> String {
     format!("{:x}", Sha256::digest(format!("series:{name}").as_bytes()))[..32].into()
@@ -28,8 +30,8 @@ pub fn season_id(name: &str, season: i64) -> String {
 }
 /// Return the Movies and Series virtual root views.
 pub fn views(state: &AppState) -> Value {
-    let rows:Vec<_>=[(MOVIES,"Movies","movies"),(SERIES,"Series","tvshows")].into_iter().map(|(id,name,kind)|json!({"Id":id,"Name":name,"ServerId":*state.server_id,"Type":"CollectionFolder","IsFolder":true,"CollectionType":kind,"ImageTags":{},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})).collect();
-    json!({"Items":rows,"TotalRecordCount":2,"StartIndex":0})
+    let rows:Vec<_>=[(MOVIES,"Movies","movies"),(SERIES,"Series","tvshows"),(ANIME,"Anime","")].into_iter().map(|(id,name,kind)|json!({"Id":id,"Name":name,"ServerId":*state.server_id,"Type":"CollectionFolder","IsFolder":true,"CollectionType":kind,"ImageTags":{},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})).collect();
+    json!({"Items":rows,"TotalRecordCount":3,"StartIndex":0})
 }
 /// Jellyfin navigation filters using PascalCase query parameter names.
 #[derive(Default, Deserialize)]
@@ -59,7 +61,7 @@ pub struct ItemQuery {
     pub user_id: Option<String>,
 }
 async fn folder_key(state: &AppState, id: &str) -> Result<(String, Option<i64>)> {
-    let keys: Vec<(String, i64)> = sqlx::query_as("SELECT DISTINCT COALESCE(series_name,'Unknown series'),COALESCE(season,0) FROM media_items WHERE available=1 AND kind='episode'")
+    let keys: Vec<(String, i64)> = sqlx::query_as("SELECT DISTINCT COALESCE(series_name,'Unknown series'),COALESCE(season,-1) FROM media_items WHERE available=1 AND kind='episode'")
         .fetch_all(&state.pool).await?;
     for (name, season) in keys {
         if series_id(&name) == id {
@@ -74,17 +76,17 @@ async fn folder_key(state: &AppState, id: &str) -> Result<(String, Option<i64>)>
 /// Resolve a virtual folder without loading unrelated media or stream metadata.
 pub async fn representative(state: &AppState, id: &str) -> Result<MediaItem> {
     let (name, season) = folder_key(state, id).await?;
-    sqlx::query_as("SELECT * FROM media_items WHERE available=1 AND kind='episode' AND COALESCE(series_name,'Unknown series')=? AND (? IS NULL OR COALESCE(season,0)=?) ORDER BY season,episode,title,id LIMIT 1")
+    sqlx::query_as("SELECT * FROM media_items WHERE available=1 AND kind='episode' AND COALESCE(series_name,'Unknown series')=? AND (? IS NULL OR COALESCE(season,-1)=?) ORDER BY season,episode,title,id LIMIT 1")
         .bind(name).bind(season).bind(season).fetch_optional(&state.pool).await?.ok_or(AppError::NotFound)
 }
 fn folder(item: &MediaItem, state: &AppState, season: bool) -> Value {
     let name = item.series_name.as_deref().unwrap_or("Unknown series");
-    let n = item.season.unwrap_or(0);
-    json!({"Id":if season {season_id(name,n)} else {series_id(name)},"Name":if season {format!("Season {n}")} else {name.into()},"ServerId":*state.server_id,"Type":if season {"Season"} else {"Series"},"IsFolder":true,"Overview":if season {""} else {&item.plot},"IndexNumber":if season {Some(n)} else {None},"ParentId":if season {series_id(name)} else {SERIES.into()},"SeriesId":series_id(name),"SeriesName":name,"ImageTags":if item.poster_path.is_some(){json!({"Primary":item.id})}else{json!({})},"BackdropImageTags":if item.backdrop_path.is_some(){json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})
+    let n = item.season.unwrap_or(-1);
+    json!({"Id":if season {season_id(name,n)} else {series_id(name)},"Name":if season {if n == -1 { "Unknown season".into() } else if n == 0 { "Specials".into() } else {format!("Season {n}")}} else {name.into()},"ServerId":*state.server_id,"Type":if season {"Season"} else {"Series"},"IsFolder":true,"Overview":if season {""} else {&item.plot},"IndexNumber":if season && n >= 0 {Some(n)} else {None},"ParentId":if season {series_id(name)} else {SERIES.into()},"SeriesId":series_id(name),"SeriesName":name,"ImageTags":if item.poster_path.is_some(){json!({"Primary":item.id})}else{json!({})},"BackdropImageTags":if item.backdrop_path.is_some(){json!([item.id])}else{json!([])},"UserData":{"PlaybackPositionTicks":0,"Played":false,"IsFavorite":false}})
 }
 /// Describe a virtual root, series or season folder.
 pub async fn get_folder(state: &AppState, id: &str) -> Result<Value> {
-    if id == MOVIES || id == SERIES {
+    if id == MOVIES || id == SERIES || id == ANIME {
         return Ok(views(state)["Items"]
             .as_array()
             .unwrap()
@@ -119,6 +121,7 @@ pub async fn list(
         match id {
             MOVIES => kind = Some("movie"),
             SERIES => kind = Some("episode"),
+            ANIME => {}
             _ => {
                 if sqlx::query_scalar::<_, bool>(
                     "SELECT EXISTS(SELECT 1 FROM libraries WHERE id=?)",
@@ -149,8 +152,10 @@ pub async fn list(
     let recursive = q.recursive == Some(true);
     let movies = types.contains(&"Movie") || defaults;
     let episodes = types.contains(&"Episode")
-        || (defaults && ((parent != Some(SERIES) && !parent_series) || recursive));
-    let series = types.contains(&"Series") || (defaults && parent == Some(SERIES) && !recursive);
+        || (defaults
+            && ((parent != Some(SERIES) && parent != Some(ANIME) && !parent_series) || recursive));
+    let series = types.contains(&"Series")
+        || (defaults && matches!(parent, Some(SERIES) | Some(ANIME)) && !recursive);
     let seasons = types.contains(&"Season") || (defaults && parent_series && !recursive);
     let mut entries = Vec::new();
     if movies || episodes {
@@ -159,13 +164,13 @@ pub async fn list(
             (true, false) => "kind='movie'",
             _ => "kind='episode'",
         };
-        entries.push(format!("SELECT 'file:'||id AS entry_id,id AS media_id,CASE WHEN kind='movie' THEN 'Movie' ELSE 'Episode' END AS item_type,title AS name,year AS production_year,episode AS index_number,season AS parent_index_number,runtime_seconds AS runtime FROM filtered WHERE {predicate}"));
+        entries.push(format!("SELECT 'file:'||id AS entry_id,id AS media_id,CASE WHEN kind='movie' THEN 'Movie' ELSE 'Episode' END AS item_type,title AS name,year AS production_year,CAST(COALESCE(episode_label,episode) AS REAL) AS index_number,season AS parent_index_number,runtime_seconds AS runtime FROM filtered WHERE {predicate}"));
     }
     if series {
         entries.push("SELECT 'series:'||COALESCE(series_name,'Unknown series'),id,'Series',COALESCE(series_name,'Unknown series'),NULL,NULL,NULL,NULL FROM (SELECT *,row_number() OVER(PARTITION BY COALESCE(series_name,'Unknown series') ORDER BY season,episode,title,id) AS rank FROM filtered WHERE kind='episode') WHERE rank=1".into());
     }
     if seasons {
-        entries.push("SELECT 'season:'||COALESCE(series_name,'Unknown series')||':'||COALESCE(season,0),id,'Season','Season '||COALESCE(season,0),NULL,COALESCE(season,0),NULL,NULL FROM (SELECT *,row_number() OVER(PARTITION BY COALESCE(series_name,'Unknown series'),COALESCE(season,0) ORDER BY season,episode,title,id) AS rank FROM filtered WHERE kind='episode') WHERE rank=1".into());
+        entries.push("SELECT 'season:'||COALESCE(series_name,'Unknown series')||':'||COALESCE(season,-1),id,'Season','Season '||COALESCE(season,-1),NULL,COALESCE(season,-1),NULL,NULL FROM (SELECT *,row_number() OVER(PARTITION BY COALESCE(series_name,'Unknown series'),COALESCE(season,-1) ORDER BY season,episode,title,id) AS rank FROM filtered WHERE kind='episode') WHERE rank=1".into());
     }
     let offset = q.start_index.unwrap_or(0).max(0);
     if entries.is_empty() {
@@ -175,8 +180,13 @@ pub async fn list(
             start_index: offset,
         });
     }
+    let anime_filter = if parent == Some(ANIME) {
+        "AND is_anime=1"
+    } else {
+        ""
+    };
     let cte = format!(
-        "WITH filtered AS (SELECT id,kind,title,year,runtime_seconds,series_name,season,episode FROM media_items WHERE available=1 AND (?1 IS NULL OR kind=?1) AND (?2 IS NULL OR library_id=?2) AND (?3 IS NULL OR COALESCE(series_name,'Unknown series')=?3) AND (?4 IS NULL OR COALESCE(season,0)=?4) AND (?5 IS NULL OR season=?5)),entries(entry_id,media_id,item_type,name,production_year,index_number,parent_index_number,runtime) AS ({})",
+        "WITH filtered AS (SELECT id,kind,title,year,runtime_seconds,series_name,season,episode,episode_label FROM media_items WHERE available=1 {anime_filter} AND (?1 IS NULL OR kind=?1) AND (?2 IS NULL OR library_id=?2) AND (?3 IS NULL OR COALESCE(series_name,'Unknown series')=?3) AND (?4 IS NULL OR COALESCE(season,-1)=?4) AND (?5 IS NULL OR season=?5)),entries(entry_id,media_id,item_type,name,production_year,index_number,parent_index_number,runtime) AS ({})",
         entries.join(" UNION ALL ")
     );
     // Search only compact names in Rust to preserve Unicode matching; page full records in SQLite.

@@ -113,12 +113,14 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
         year: Option<i64>,
         season: Option<i64>,
         episode: Option<i64>,
+        episode_end: Option<i64>,
+        episode_label: Option<String>,
         kind: String,
         attempts: i64,
         revision: i64,
     }
     let job:Option<Job>=sqlx::query_as(
-        "SELECT i.id,i.path,i.title,i.series_name,i.year,i.season,i.episode,i.kind,j.attempts,j.revision FROM tmdb_jobs j JOIN media_items i ON i.id=j.media_item_id WHERE j.next_attempt_at<=unixepoch() AND i.available=1 ORDER BY j.next_attempt_at,j.media_item_id LIMIT 1"
+        "SELECT i.id,i.path,i.title,i.series_name,i.year,i.season,i.episode,i.episode_end,i.episode_label,i.kind,j.attempts,j.revision FROM tmdb_jobs j JOIN media_items i ON i.id=j.media_item_id WHERE j.next_attempt_at<=unixepoch() AND i.available=1 ORDER BY j.next_attempt_at,j.media_item_id LIMIT 1"
     ).fetch_optional(&state.pool).await?;
     let Some(Job {
         id,
@@ -128,6 +130,8 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
         year,
         season,
         episode,
+        episode_end,
+        episode_label,
         kind,
         attempts,
         revision,
@@ -153,8 +157,20 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
         year,
         season,
         episode,
+        episode_end,
+        episode_label,
     };
-    match metadata::fetch(state, &scene, kind == "episode").await {
+    let known_id: Option<i64> = if kind == "episode" {
+        sqlx::query_scalar("SELECT s.tmdb_id FROM episodes e JOIN seasons se ON se.id=e.season_id JOIN shows s ON s.id=se.show_id WHERE e.id=?")
+            .bind(&id).fetch_optional(&state.pool).await?.flatten()
+    } else {
+        sqlx::query_scalar("SELECT tmdb_id FROM movies WHERE id=?")
+            .bind(&id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten()
+    };
+    match metadata::fetch(state, &scene, kind == "episode", known_id).await {
         Ok(result) => {
             let mut tx = state.pool.begin().await?;
             // A rescan may have changed the file or local metadata while HTTP was in flight.
@@ -165,6 +181,9 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<bool> {
                     return Ok(true);
                 }
                 if let Some(data) = result {
+                    sqlx::query("UPDATE media_items SET is_anime=MAX(is_anime,?),matched_season=?,matched_episode=? WHERE id=?")
+                        .bind(data.is_anime).bind(data.matched_episode.map(|(s,_)|s)).bind(data.matched_episode.map(|(_,e)|e))
+                        .bind(&id).execute(&mut *tx).await?;
                     for (name, role, person_id) in data.people.iter().filter(|_| !local) {
                         sqlx::query("INSERT INTO people(name,tmdb_id) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET tmdb_id=COALESCE(people.tmdb_id,excluded.tmdb_id)")
                             .bind(name).bind(person_id)
@@ -310,6 +329,10 @@ mod tests {
             "search/tv" => json!({"results":[{"id":42,"name":"Alien Earth"}]}),
             "tv/42" => {
                 json!({"id":42,"name":"Alien: Earth","overview":"Series synopsis","poster_path":"/poster.jpg","backdrop_path":"/backdrop.jpg","genres":[{"id":18,"name":"Drama"}]})
+            }
+            "tv/42/episode_groups" => json!({"results":[{"id":"absolute-fixture","type":2}]}),
+            "tv/episode_group/absolute-fixture" => {
+                json!({"type":2,"groups":[{"order":0,"episodes":[{"order":0,"season_number":1,"episode_number":2}]}]})
             }
             "tv/42/season/1" => json!({"poster_path":"/season.jpg"}),
             "tv/42/season/1/episode/2" => {
@@ -689,5 +712,17 @@ mod tests {
             .await
             .unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn anime_absolute_metadata_keeps_source_numbering() {
+        let (_dir, state, _mock, task) = fixture(false).await;
+        sqlx::query("UPDATE media_items SET season=NULL,episode=1,episode_label='1',is_anime=1 WHERE id='ep'")
+            .execute(&state.pool).await.unwrap();
+        assert!(run_once(&state).await.unwrap());
+        let row:(Option<i64>,i64,Option<i64>,Option<i64>,String)=sqlx::query_as("SELECT season,episode,matched_season,matched_episode,title FROM media_items WHERE id='ep'")
+            .fetch_one(&state.pool).await.unwrap();
+        assert_eq!(row, (None, 1, Some(1), Some(2), "Official episode".into()));
+        task.abort();
     }
 }

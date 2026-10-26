@@ -105,6 +105,15 @@ def main():
                 conn.execute("UPDATE media_items SET chapters_json=? WHERE id='northstar-1-1'",(json.dumps([{'start_time':'0','end_time':'8','tags':{'title':'Intro'}}]),))
                 os.link(film,media / 'Afterlight.trailer.mp4')
                 subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=220:duration=4','-q:a','5',str(media / 'theme.mp3')],check=True)
+                anime = media / 'Anime'
+                anime.mkdir()
+                os.link(film, anime / 'Orbit.mp4')
+                conn.execute("UPDATE media_items SET is_anime=1,path=? WHERE id='movie-0001'", (str(anime / 'Orbit.mp4'),))
+                for identifier, source in conn.execute("SELECT id,path FROM media_items WHERE series_name='Northstar'"):
+                    os.link(source, anime / f'{identifier}.mp4')
+                conn.execute("UPDATE media_items SET is_anime=1,path=? || '/' || id || '.mp4' WHERE series_name='Northstar'", (str(anime),))
+                conn.execute("UPDATE media_items SET episode_label='2-3',episode_end=3 WHERE id='northstar-1-2'")
+                conn.execute("UPDATE media_items SET episode_label='3.5' WHERE id='northstar-1-3'")
                 conn.commit(); conn.close()
                 class Ready(http.server.BaseHTTPRequestHandler):
                     def do_GET(self):

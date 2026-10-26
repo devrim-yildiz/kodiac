@@ -941,7 +941,8 @@ body {
     display: none;
   }
   .navigation .segments button {
-    min-width: 48px;
+    min-width: 40px;
+    padding-inline: 6px;
   }
   .navigation .icon-button {
     width: 28px;

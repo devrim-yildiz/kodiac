@@ -1025,7 +1025,7 @@ async fn changing_the_configured_root_hides_previous_library() {
             .await,
     )
     .await;
-    assert_eq!(views["TotalRecordCount"], 2);
+    assert_eq!(views["TotalRecordCount"], 3);
 }
 
 #[tokio::test]
@@ -2218,4 +2218,284 @@ fn login_survives_an_exhausted_disk_io_pool() {
         disk_task.await.unwrap();
         assert!(result.unwrap().is_ok());
     });
+}
+
+#[tokio::test]
+async fn anime_scan_preserves_absolute_numbers_nfo_and_identity() {
+    let f = Fixture::new().await;
+    let anime = f.state.config.media_path.join("Anime");
+    tokio::fs::create_dir(&anime).await.unwrap();
+    for name in [
+        "[Group] Frieren - 028v2 [1080p].mkv",
+        "[Group] Frieren - 029 [1080p].mkv",
+        "[Group] Your.Name.2016.1080p.mkv",
+        "[Group] Local - 099 [1080p].mkv",
+    ] {
+        tokio::fs::write(anime.join(name), b"video").await.unwrap();
+    }
+    tokio::fs::write(anime.join("[Group] Local - 099 [1080p].nfo"), b"<episodedetails><title>Local episode</title><showtitle>Local show</showtitle><season>2</season><episode>3</episode></episodedetails>").await.unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let shows = value(f.request("GET", "/api/v1/shows", &[], Value::Null).await).await;
+    assert_eq!(shows["total"], 2);
+    assert!(
+        shows["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["is_anime"] == true)
+    );
+    let show = shows["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["title"] == "Frieren")
+        .unwrap();
+    let seasons = value(
+        f.request(
+            "GET",
+            &format!("/api/v1/shows/{}/seasons", show["id"].as_str().unwrap()),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert!(seasons["items"][0]["season_number"].is_null());
+    let episodes = value(
+        f.request(
+            "GET",
+            &format!(
+                "/api/v1/seasons/{}/episodes",
+                seasons["items"][0]["id"].as_str().unwrap()
+            ),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(episodes["total"], 2);
+    assert_eq!(episodes["items"][0]["episode_number"], 28);
+    assert_eq!(episodes["items"][1]["episode_number"], 29);
+    let local: (String, i64, i64) = sqlx::query_as(
+        "SELECT title,season,episode FROM media_items WHERE series_name='Local show'",
+    )
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(local, ("Local episode".into(), 2, 3));
+    let movies = value(f.request("GET", "/api/v1/movies", &[], Value::Null).await).await;
+    assert_eq!(movies["total"], 2);
+    let film = movies["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["title"] == "Your Name")
+        .unwrap();
+    assert_eq!(film["is_anime"], true);
+    assert_eq!(movies["items"][0]["is_anime"], false);
+    let episode = episodes["items"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/v1/playback",
+            &[],
+            json!({"item_id":episode,"position_ticks":10000000})
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    scanner::scan(&f.state).await.unwrap();
+    let history = value(
+        f.request("GET", "/api/v1/continue-watching", &[], Value::Null)
+            .await,
+    )
+    .await;
+    assert_eq!(history["items"][0]["id"], episode);
+    assert_eq!(history["items"][0]["is_anime"], true);
+    let detail = f
+        .request("GET", &format!("/Items/{episode}"), &[], Value::Null)
+        .await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    assert_eq!(value(detail).await["Type"], "Episode");
+}
+
+#[tokio::test]
+async fn full_anime_ranges_fractions_specials_nfo_and_clients() {
+    let f = Fixture::new().await;
+    let root = f.state.config.media_path.join("Anime");
+    let show = root.join("Test Show");
+    let season = show.join("Season 2");
+    tokio::fs::create_dir_all(&season).await.unwrap();
+    for name in [
+        "Test.Show.E01.mkv",
+        "Test.Show.E02-03.mkv",
+        "Test.Show.E03.5.mkv",
+        "Test.Show.E04.mkv",
+        "Test.Show.E04.sample.mkv",
+        "Test Show OVA 01.mkv",
+    ] {
+        tokio::fs::write(show.join(name), b"video").await.unwrap();
+    }
+    tokio::fs::write(season.join("03.mkv"), b"video")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        show.join("tvshow.nfo"),
+        b"<tvshow><title>Test Show</title><genre>Anime</genre></tvshow>",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(show.join("poster.jpg"), b"poster")
+        .await
+        .unwrap();
+    tokio::fs::write(root.join("Numbered - 02.mkv"), b"video")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        root.join("Numbered - 02.nfo"),
+        b"<movie><title>Numbered 2</title></movie>",
+    )
+    .await
+    .unwrap();
+    scanner::scan(&f.state).await.unwrap();
+    let sample: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM media_items WHERE path LIKE '%.sample.mkv'")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(sample, 0);
+    let movie: (String, bool) =
+        sqlx::query_as("SELECT kind,is_anime FROM media_items WHERE title='Numbered 2'")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(movie, ("movie".into(), true));
+    let seasons: Vec<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT season,episode FROM media_items WHERE path LIKE '%/03.mkv' OR path LIKE '%OVA%'",
+    )
+    .fetch_all(&f.state.pool)
+    .await
+    .unwrap();
+    assert!(seasons.contains(&(Some(2), Some(3))));
+    assert!(seasons.contains(&(Some(0), Some(1))));
+    let id: String = sqlx::query_scalar("SELECT id FROM media_items WHERE episode_end=3")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let jf = value(
+        f.request("GET", &format!("/Items/{id}"), &[], Value::Null)
+            .await,
+    )
+    .await;
+    assert_eq!(jf["IndexNumber"], 2);
+    assert_eq!(jf["IndexNumberEnd"], 3);
+    let experience = value(
+        f.request(
+            "GET",
+            &format!("/api/v1/items/{id}/experience"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(experience["next_episode"]["episode_label"], "3.5");
+    let views = value(
+        f.request("GET", &format!("/Users/{}/Views", f.user), &[], Value::Null)
+            .await,
+    )
+    .await;
+    assert!(
+        views["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["Name"] == "Anime")
+    );
+    let anime = value(
+        f.request(
+            "GET",
+            "/Items?ParentId=00000000000000000000000000000003",
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(anime["TotalRecordCount"], 2);
+    assert!(
+        anime["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["Type"] == "Series")
+    );
+    let jf_seasons = value(
+        f.request(
+            "GET",
+            &format!(
+                "/Items?ParentId={}",
+                kodiac::api::jellyfin::navigation::series_id("Test Show")
+            ),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(jf_seasons["TotalRecordCount"], 3);
+}
+
+#[tokio::test]
+async fn anime_reclassification_is_atomic_idempotent_and_retains_progress() {
+    let f = Fixture::new().await;
+    sqlx::query("UPDATE media_items SET path='/media/anime/Pokemon/Pokemon.E394.mkv',title='Old movie',local_metadata=0 WHERE id=?").bind(&f.item).execute(&f.state.pool).await.unwrap();
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/v1/playback",
+            &[],
+            json!({"item_id":f.item,"position_ticks":10000000})
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    sqlx::query("DELETE FROM settings WHERE key='anime_detection_v2'")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO collections(id,title) VALUES('keep','My collection')")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO collection_movies(collection_id,movie_id) VALUES('keep',?)")
+        .bind(&f.item)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    scanner::reclassify_anime(&f.state.pool).await.unwrap();
+    scanner::reclassify_anime(&f.state.pool).await.unwrap();
+    let links: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM collection_shows WHERE collection_id='keep'")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(links, 1);
+    let row: (String, bool, i64) =
+        sqlx::query_as("SELECT kind,is_anime,episode FROM media_items WHERE id=?")
+            .bind(&f.item)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(row, ("episode".into(), true, 394));
+    let history = value(
+        f.request("GET", "/api/v1/continue-watching", &[], Value::Null)
+            .await,
+    )
+    .await;
+    assert_eq!(history["items"][0]["id"], f.item);
+    assert_eq!(history["items"][0]["position_ticks"], 10000000);
 }

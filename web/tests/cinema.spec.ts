@@ -445,3 +445,40 @@ test("an unsupported original response recovers through actual remux playback", 
   await startFilm(page);
   await remux;
 });
+
+test("Anime includes films and shows, search and episode navigation", async ({
+  page,
+}) => {
+  await page.getByRole("tab", { name: "Anime", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Your anime" })).toBeVisible();
+  await expect(page.locator(".title-card")).toHaveCount(2);
+  await expect(
+    page.getByRole("button", {
+      name: "Details for A Quiet Orbit",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.getByLabel("Search your library").fill("Northstar");
+  await expect(page.locator(".title-card")).toHaveCount(1);
+  await page
+    .getByRole("button", { name: "Details for Northstar", exact: true })
+    .click();
+  await expect(page.locator(".episode-row")).toHaveCount(3);
+  await expect(page.locator(".episode-row").nth(1)).toContainText("S01E2-3");
+  await expect(page.locator(".episode-row").nth(2)).toContainText("S01E3.5");
+  await page
+    .getByRole("button", { name: "Back to library", exact: true })
+    .click();
+  await page.getByLabel("Clear search").click();
+  await page.screenshot({ path: "../validation/anime-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(
+    page.getByRole("tab", { name: "Anime", exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({ path: "../validation/anime-mobile.png" });
+});

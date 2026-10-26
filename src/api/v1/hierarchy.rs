@@ -31,8 +31,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/continue-watching", get(continue_watching))
 }
-const MOVIE: &str = "json_object('rating',i.rating,'genres',json(m.genres_json),'id',m.id,'kind','movie','title',m.title,'overview',m.overview,'backdrop_url',CASE WHEN m.backdrop_path IS NOT NULL THEN '/api/v1/items/'||m.id||'/backdrop' END,'year',m.year,'tmdb_id',m.tmdb_id,'runtime_seconds',i.runtime_seconds,'poster_url',CASE WHEN m.poster_path IS NOT NULL THEN '/api/v1/items/'||m.id||'/poster' END)";
-const SHOW: &str = "json_object('genres',json(s.genres_json),'id',s.id,'title',s.title,'overview',s.overview,'poster_url',CASE WHEN s.poster_path IS NOT NULL THEN '/api/v1/shows/'||s.id||'/images/poster' END,'backdrop_url',CASE WHEN s.backdrop_path IS NOT NULL THEN '/api/v1/shows/'||s.id||'/images/backdrop' END,'year',s.year,'tmdb_id',s.tmdb_id,'season_count',(SELECT count(*) FROM seasons se WHERE se.show_id=s.id AND EXISTS(SELECT 1 FROM episodes e JOIN media_items i ON i.id=e.id WHERE e.season_id=se.id AND i.available=1)),'episode_count',(SELECT count(*) FROM episodes e JOIN seasons se ON se.id=e.season_id JOIN media_items i ON i.id=e.id WHERE se.show_id=s.id AND i.available=1))";
+const MOVIE: &str = "json_object('is_anime',json(CASE WHEN i.is_anime=1 THEN 'true' ELSE 'false' END),'rating',i.rating,'genres',json(m.genres_json),'id',m.id,'kind','movie','title',m.title,'overview',m.overview,'backdrop_url',CASE WHEN m.backdrop_path IS NOT NULL THEN '/api/v1/items/'||m.id||'/backdrop' END,'year',m.year,'tmdb_id',m.tmdb_id,'runtime_seconds',i.runtime_seconds,'poster_url',CASE WHEN m.poster_path IS NOT NULL THEN '/api/v1/items/'||m.id||'/poster' END)";
+const SHOW: &str = "json_object('is_anime',json(CASE WHEN EXISTS(SELECT 1 FROM episodes ae JOIN seasons ase ON ase.id=ae.season_id JOIN media_items ai ON ai.id=ae.id WHERE ase.show_id=s.id AND ai.available=1 AND ai.is_anime=1) THEN 'true' ELSE 'false' END),'genres',json(s.genres_json),'id',s.id,'title',s.title,'overview',s.overview,'poster_url',CASE WHEN s.poster_path IS NOT NULL THEN '/api/v1/shows/'||s.id||'/images/poster' END,'backdrop_url',CASE WHEN s.backdrop_path IS NOT NULL THEN '/api/v1/shows/'||s.id||'/images/backdrop' END,'year',s.year,'tmdb_id',s.tmdb_id,'season_count',(SELECT count(*) FROM seasons se WHERE se.show_id=s.id AND EXISTS(SELECT 1 FROM episodes e JOIN media_items i ON i.id=e.id WHERE e.season_id=se.id AND i.available=1)),'episode_count',(SELECT count(*) FROM episodes e JOIN seasons se ON se.id=e.season_id JOIN media_items i ON i.id=e.id WHERE se.show_id=s.id AND i.available=1))";
 async fn page(
     pool: &SqlitePool,
     projection: &str,
@@ -99,7 +99,7 @@ async fn episodes(
     {
         return Err(AppError::NotFound);
     }
-    page(&state.pool,"json_object('id',e.id,'kind','episode','season_id',e.season_id,'episode_number',e.episode_number,'title',e.title,'overview',e.overview,'year',e.year,'runtime_seconds',i.runtime_seconds,'still_url',CASE WHEN e.still_path IS NOT NULL THEN '/api/v1/items/'||e.id||'/poster' END)", "FROM episodes e JOIN media_items i ON i.id=e.id", "e.season_id=? AND instr(lower(e.title),lower(?))>0 AND i.available=1", "e.episode_number,e.id", q, &id).await
+    page(&state.pool,"json_object('id',e.id,'kind','episode','season_id',e.season_id,'matched_season',i.matched_season,'matched_episode',i.matched_episode,'episode_end',i.episode_end,'episode_label',i.episode_label,'episode_number',e.episode_number,'title',e.title,'overview',e.overview,'year',e.year,'runtime_seconds',i.runtime_seconds,'still_url',CASE WHEN e.still_path IS NOT NULL THEN '/api/v1/items/'||e.id||'/poster' END)", "FROM episodes e JOIN media_items i ON i.id=e.id", "e.season_id=? AND instr(lower(e.title),lower(?))>0 AND i.available=1", "CAST(COALESCE(i.episode_label,e.episode_number) AS REAL),e.id", q, &id).await
 }
 async fn movies(
     State(state): State<AppState>,
@@ -266,7 +266,7 @@ async fn continue_watching(
         .bind(&profile)
         .fetch_one(&state.pool)
         .await?;
-    let rows:Vec<String>=sqlx::query_scalar(&format!("SELECT json_object('id',i.id,'kind',i.kind,'title',i.title,'show_id',s.id,'show_title',s.title,'season_id',se.id,'season_number',i.season,'episode_number',i.episode,'position_ticks',h.position_ticks,'runtime_seconds',i.runtime_seconds,'updated_at',h.updated_at,'profile_id',h.profile_id) {source} ORDER BY h.updated_at DESC,i.id LIMIT ? OFFSET ?"))
+    let rows:Vec<String>=sqlx::query_scalar(&format!("SELECT json_object('is_anime',json(CASE WHEN i.is_anime=1 THEN 'true' ELSE 'false' END),'id',i.id,'kind',i.kind,'title',i.title,'show_id',s.id,'show_title',s.title,'season_id',se.id,'season_number',i.season,'matched_season',i.matched_season,'matched_episode',i.matched_episode,'episode_end',i.episode_end,'episode_label',i.episode_label,'episode_number',i.episode,'position_ticks',h.position_ticks,'runtime_seconds',i.runtime_seconds,'updated_at',h.updated_at,'profile_id',h.profile_id) {source} ORDER BY h.updated_at DESC,i.id LIMIT ? OFFSET ?"))
         .bind(profile).bind(q.limit.unwrap_or(100).clamp(1,200)).bind(q.offset.unwrap_or(0).max(0)).fetch_all(&state.pool).await?;
     let items: Vec<Value> = rows
         .iter()

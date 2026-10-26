@@ -59,6 +59,7 @@ pub async fn connect(config: &Config) -> anyhow::Result<SqlitePool> {
         .connect_with(options)
         .await?;
     sqlx::migrate!().run(&pool).await?;
+    crate::scanner::reclassify_anime(&pool).await?;
     sqlx::query("INSERT OR IGNORE INTO settings(key,value) VALUES ('server_id', ?)")
         .bind(uuid::Uuid::new_v4().simple().to_string())
         .execute(&pool)
@@ -92,6 +93,12 @@ pub struct MediaItem {
     pub season: Option<i64>,
     /// Episode number when known.
     pub episode: Option<i64>,
+    /// Whether this source belongs to the anime collection.
+    pub is_anime: bool,
+    /// Last episode in a combined source file.
+    pub episode_end: Option<i64>,
+    /// Original fractional or range label.
+    pub episode_label: Option<String>,
     /// Local poster filename, excluded from public serialization.
     #[serde(skip)]
     pub poster_path: Option<String>,

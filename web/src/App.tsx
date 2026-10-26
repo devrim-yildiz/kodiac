@@ -335,12 +335,11 @@ function Cinema() {
   }, [query, kind]);
   const collection = useMemo(
     () =>
-      [
-        ...(kind === "show" ? [] : movies),
-        ...(kind === "movie" ? [] : shows),
-      ].sort(
-        (a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id),
-      ),
+      [...(kind === "show" ? [] : movies), ...(kind === "movie" ? [] : shows)]
+        .filter((item) => kind !== "anime" || item.is_anime)
+        .sort(
+          (a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id),
+        ),
     [movies, shows, kind],
   );
   const filtered = useMemo(
@@ -479,6 +478,7 @@ function Cinema() {
                   <Tabs.Trigger value="all">Home</Tabs.Trigger>
                   <Tabs.Trigger value="movie">Movies</Tabs.Trigger>
                   <Tabs.Trigger value="show">Series</Tabs.Trigger>
+                  <Tabs.Trigger value="anime">Anime</Tabs.Trigger>
                 </Tabs.List>
               </Tabs.Root>
               <div className="nav-right">
@@ -642,9 +642,11 @@ function Cinema() {
                       items={continued.filter(
                         (item) =>
                           kind === "all" ||
-                          (kind === "show"
-                            ? item.kind === "episode"
-                            : item.kind === "movie"),
+                          (kind === "anime"
+                            ? item.is_anime
+                            : kind === "show"
+                              ? item.kind === "episode"
+                              : item.kind === "movie"),
                       )}
                       onPlay={(item) => void onPlay(item)}
                     />
@@ -668,7 +670,9 @@ function Cinema() {
                             ? "Your movies"
                             : kind === "show"
                               ? "Your series"
-                              : "Your collection"
+                              : kind === "anime"
+                                ? "Your anime"
+                                : "Your collection"
                       }
                       count={(query
                         ? filtered.length
@@ -676,7 +680,9 @@ function Cinema() {
                           ? counts.movie
                           : kind === "show"
                             ? counts.show
-                            : counts.movie + counts.show
+                            : kind === "anime"
+                              ? collection.length
+                              : counts.movie + counts.show
                       ).toLocaleString()}
                     >
                       <span className="library-sort">
@@ -693,14 +699,21 @@ function Cinema() {
                     )}
                     {kind === "all" && !query ? (
                       <p className="library-invitation">
-                        Explore every story in Movies or Series.
+                        Explore every story in Movies, Series or Anime.
                       </p>
                     ) : loading && !collection.length ? (
                       <Loading />
                     ) : !loading && !collection.length && !query ? (
-                      <Empty title="Your collection starts here">
-                        Index your media to bring your movies and series
-                        together.
+                      <Empty
+                        title={
+                          kind === "anime"
+                            ? "Your anime collection starts here"
+                            : "Your collection starts here"
+                        }
+                      >
+                        {kind === "anime"
+                          ? "Add anime movies and series to your Anime folder, then scan your library."
+                          : "Index your media to bring your movies and series together."}
                       </Empty>
                     ) : (
                       <VirtualLibrary items={filtered} onOpen={onOpen} />

@@ -141,3 +141,18 @@ size is reported as null instead of starting unlimited blocked directory walks.
 Docker RAM caps require host memory-cgroup support. Hosts without that support
 ignore `mem_limit`; process separation alone cannot prevent a host-wide OOM.
 PID/thread budgets and job/request deadlines still apply independently.
+
+### Anime classification and numbering
+
+Migration 0007 adds anime classification, source episode ranges/labels and optional
+verified TMDB numbering to `media_items`. The first startup reclassifies existing
+anime filename hints atomically from SQLite without touching media files. It
+retains source IDs, local NFO metadata, playback rows and collection membership;
+samples become unavailable without deleting their records. Regular scanning also
+uses show/season directories, inherited show NFOs, explicit movie NFOs and artwork.
+
+Absolute source labels remain independent of canonical season numbering. Metadata
+uses one unambiguous TMDB Absolute episode group; incomplete or ambiguous mappings
+stay unassigned. Fractional/range ordering drives native next-episode discovery.
+Both browser discovery and Jellyfin expose the mixed Anime collection; unknown
+seasons remain separate from specials.
