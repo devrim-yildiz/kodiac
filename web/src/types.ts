@@ -51,6 +51,12 @@ export interface Profile {
 export interface User {
   id: string;
   username: string;
+  is_admin: boolean;
+}
+export interface Preferences {
+  audio_language_preference: string;
+  subtitle_mode: string;
+  home_sections: string[];
 }
 export interface Page<T> {
   items: T[];

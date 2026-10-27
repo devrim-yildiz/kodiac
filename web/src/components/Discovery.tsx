@@ -11,7 +11,7 @@ export interface Hub {
   continue_watching: Title[];
   because_you_watched: Title[];
   because_title: string | null;
-  collections: { id: string; title: string; items: Title[] }[];
+  collections: { id: string; title: string; items: Title[]; total: number }[];
 }
 export function Shelf({
   title,
@@ -38,50 +38,56 @@ export function Shelf({
 }
 export function Curated({
   hub,
+  section,
   onOpen,
+  onCollection,
 }: {
-  hub: Hub | null;
+  hub: Hub;
+  section: string;
   onOpen: (t: Title) => void;
+  onCollection: (c: { id: string; title: string }) => void;
 }) {
-  if (!hub) return null;
-  return (
-    <div className="discovery-shelves">
-      <Shelf
-        title="Just arrived"
-        eyebrow="NEW WORLDS AWAIT"
-        items={hub.recently_added}
-        onOpen={onOpen}
-      />
-      <Shelf
-        title="Exceptional stories"
-        eyebrow="THE HIGHEST RATED IN YOUR LIBRARY"
-        items={hub.top_rated}
-        onOpen={onOpen}
-      />
-      <Shelf
-        title="Your next obsession"
-        eyebrow="SERIES TO GET LOST IN"
-        items={hub.trending_shows}
-        onOpen={onOpen}
-      />
-      {hub.because_title && (
-        <Shelf
-          title={`Because you watched ${hub.because_title}`}
-          items={hub.because_you_watched}
-          onOpen={onOpen}
-        />
-      )}{" "}
-      {hub.collections.map((c) => (
-        <Shelf
-          key={c.id}
-          title={c.title}
-          eyebrow="THE COMPLETE EXPERIENCE"
-          items={c.items}
-          onOpen={onOpen}
-        />
-      ))}
-    </div>
-  );
+  if (section === "collections")
+    return hub.collections.length ? (
+      <section className="collections-section content-width">
+        <SectionHeading title="Collections" />
+        <div className="collection-shelf">
+          {hub.collections.map((c) => (
+            <button
+              key={c.id}
+              className="collection-card"
+              onClick={() => onCollection(c)}
+            >
+              <div className="collection-art">
+                {c.items.slice(0, 3).map((t) => (
+                  <Artwork key={t.id} src={t.poster_url} title={t.title} />
+                ))}
+              </div>
+              <h3>{c.title}</h3>
+              <p>{c.total ?? c.items.length} movies</p>
+            </button>
+          ))}
+        </div>
+      </section>
+    ) : null;
+  const rows: Record<string, { title: string; items: Title[] }> = {
+    recent: {
+      title: "Recently added",
+      items: hub.recently_added.filter((t) => t.kind !== "episode"),
+    },
+    top: { title: "Top rated", items: hub.top_rated },
+    series: { title: "Unwatched series", items: hub.trending_shows },
+    recommended: {
+      title: hub.because_title
+        ? `More like ${hub.because_title}`
+        : "Recommended for you",
+      items: hub.because_you_watched,
+    },
+  };
+  const row = rows[section];
+  return row ? (
+    <Shelf title={row.title} items={row.items} onOpen={onOpen} />
+  ) : null;
 }
 interface Results {
   titles: Title[];
@@ -93,11 +99,13 @@ export function CommandPalette({
   onClose,
   onOpen,
   hub,
+  onCollection,
 }: {
   open: boolean;
   onClose: () => void;
   onOpen: (t: Title) => void;
   hub: Hub | null;
+  onCollection: (c: { id: string; title: string }) => void;
 }) {
   const [q, setQ] = useState(""),
     [r, setR] = useState<Results>({ titles: [], people: [], franchises: [] }),
@@ -150,11 +158,8 @@ export function CommandPalette({
       group: "Collections",
       t: hub?.collections.find((x) => x.id === c.id)?.items[0],
       run: () => {
-        setPerson({
-          name: c.title,
-          bio: "Every story in this collection.",
-          items: hub?.collections.find((x) => x.id === c.id)?.items || [],
-        });
+        onCollection(c);
+        onClose();
       },
     })),
     ...r.people.map((p) => ({
@@ -200,7 +205,7 @@ export function CommandPalette({
             }
           }}
         >
-          <Dialog.Title className="sr-only">Find your next story</Dialog.Title>
+          <Dialog.Title className="sr-only">Search library</Dialog.Title>
           <Dialog.Description className="sr-only">
             Search titles, collections, actors and directors. Use arrow keys to
             choose and Enter to open.
@@ -209,7 +214,7 @@ export function CommandPalette({
             <Search size={22} />
             <input
               aria-label="Search titles, people and collections"
-              placeholder="A title. A face. A whole new world."
+              placeholder="Search titles, people or collections"
               value={q}
               onChange={(e) => {
                 setQ(e.target.value);
@@ -229,7 +234,7 @@ export function CommandPalette({
             {person ? (
               <>
                 <h2>{person.name}</h2>
-                <p>{person.bio || "Explore their work in your library."}</p>
+                <p>{person.bio || "Titles in your library."}</p>
                 <div className="person-grid">
                   {person.items.map((t) => (
                     <TitleCard
@@ -266,11 +271,10 @@ export function CommandPalette({
               ))
             ) : (
               <div className="spotlight-empty">
-                <span className="eyebrow">FOLLOW YOUR CURIOSITY</span>
                 <p>
                   {q
                     ? "No matches in your library."
-                    : "Search your entire cinema, instantly."}
+                    : "Search movies, series, collections and people."}
                 </p>
               </div>
             )}

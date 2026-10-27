@@ -1,143 +1,10 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDown, ArrowLeft, ArrowRight, Info, Play } from "lucide-react";
+import { ArrowLeft, ArrowRight, Play } from "lucide-react";
 import type { Title } from "../types";
 import { formatTime, idPath } from "../types";
-import { AmbientTrailer } from "./Immersion";
-import { usePlayer } from "../store";
-import {
-  Artwork,
-  Empty,
-  Genres,
-  Meta,
-  SectionHeading,
-  TitleCard,
-  useSource,
-} from "./shared";
+import { Artwork, Empty, SectionHeading, TitleCard } from "./shared";
 
-export function Hero({
-  items,
-  onOpen,
-  onPlay,
-}: {
-  items: Title[];
-  onOpen: (item: Title) => void;
-  onPlay: (item: Title) => void;
-}) {
-  const featured = useMemo(() => {
-    const withArt = items.filter((item) => item.backdrop_url);
-    return (withArt.length ? withArt : items).slice(0, 5);
-  }, [items]);
-  const [hovered, setHovered] = useState(false);
-  const [index, setIndex] = useState(0);
-  const item = featured[index % Math.max(1, featured.length)];
-  const source = useSource(item?.kind === "movie" ? item.id : undefined);
-  useEffect(() => {
-    if (featured.length < 2) return;
-    const interval = setInterval(() => {
-      if (
-        !hovered &&
-        !document.hidden &&
-        !usePlayer.getState().expanded &&
-        !document.querySelector('[role="dialog"]')
-      )
-        setIndex((n) => n + 1);
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [featured.length, hovered]);
-  if (!item)
-    return (
-      <section className="hero hero-empty">
-        <div className="hero-content">
-          <span className="eyebrow">THE BEST SEAT IS YOURS</span>
-          <h1>
-            Your cinema.
-            <br />
-            <span>At home.</span>
-          </h1>
-          <p>
-            Your movies and series will appear here when your library is
-            indexed.
-          </p>
-        </div>
-      </section>
-    );
-  return (
-    <section
-      className="hero"
-      aria-label="Featured title"
-      onMouseEnter={() => setHovered(true)}
-      onPointerMove={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onFocus={() => setHovered(true)}
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget)) setHovered(false);
-      }}
-    >
-      {item.kind !== "show" && (
-        <AmbientTrailer id={item.id} hovered={hovered} />
-      )}
-      <Artwork
-        key={item.id}
-        src={
-          item.backdrop_url ||
-          item.poster_url ||
-          (item.kind === "show"
-            ? `/api/v1/shows/${idPath(item.id)}/images/backdrop`
-            : `/api/v1/items/${idPath(item.id)}/backdrop`)
-        }
-        className="hero-art"
-        eager
-      />
-      <div className="hero-shade" />
-      <div className="hero-content">
-        <span className="eyebrow hero-kicker">
-          <span className="live-dot" /> IN YOUR LIBRARY
-        </span>
-        <Genres item={item} />
-        <h1 key={item.id}>{item.title}</h1>
-        <Meta item={item} source={source} />
-        <p className="hero-overview">
-          {item.overview || "No synopsis available yet."}
-        </p>
-        <div className="hero-actions">
-          <button className="primary-button" onClick={() => onPlay(item)}>
-            <Play size={19} fill="currentColor" />
-            {item.kind === "show"
-              ? "Watch series"
-              : item.position_ticks
-                ? "Resume"
-                : "Play"}
-          </button>
-          <button
-            className="hero-detail glass-button"
-            onClick={() => onOpen(item)}
-          >
-            <Info size={19} /> More info
-          </button>
-        </div>
-      </div>
-      <div className="hero-footer">
-        <a href="#library">
-          <ArrowDown size={14} /> EXPLORE YOUR COLLECTION
-        </a>
-        <div className="hero-pagination" aria-label="Featured titles">
-          {featured.map((title, n) => (
-            <button
-              key={title.id}
-              className={n === index % featured.length ? "active" : ""}
-              onClick={() => setIndex(n)}
-              aria-label={`Feature ${title.title}`}
-              aria-pressed={n === index % featured.length}
-            >
-              <span />
-            </button>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 export function ContinueWatching({
   items,
   onPlay,
@@ -149,10 +16,7 @@ export function ContinueWatching({
   if (!items.length) return null;
   return (
     <section className="continue-section content-width">
-      <SectionHeading
-        eyebrow="RIGHT WHERE YOU LEFT OFF"
-        title="Continue watching"
-      >
+      <SectionHeading title="Continue watching">
         <div className="shelf-arrows">
           <button
             className="icon-button"
@@ -212,7 +76,7 @@ export function ContinueWatching({
                 </div>
               </div>
               <h3>{item.show_title || item.title}</h3>
-              <p>{item.show_title ? item.title : "Continue film"}</p>
+              <p>{item.show_title ? item.title : item.year}</p>
             </button>
           );
         })}

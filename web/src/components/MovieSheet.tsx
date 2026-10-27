@@ -5,6 +5,7 @@ import { useSpatialPresence } from "./useSpatialPresence";
 import { api, aborted, message } from "../api";
 import type { Title } from "../types";
 import { idPath } from "../types";
+import { useSession } from "../store";
 import { Artwork, Genres, Meta, useSource } from "./shared";
 
 export default function MovieSheet({
@@ -12,12 +13,20 @@ export default function MovieSheet({
   open,
   onClose,
   onPlay,
+  collections,
+  onCollectionChanged,
 }: {
   movie: Title;
   open: boolean;
   onClose: () => void;
   onPlay: (movie: Title) => void;
+  collections: { id: string; title: string }[];
+  onCollectionChanged: () => void;
 }) {
+  const admin = useSession((s) => s.user?.is_admin);
+  const [collectionName, setCollectionName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [collectionStatus, setCollectionStatus] = useState("");
   const spatial = useSpatialPresence(open);
   const [detail, setDetail] = useState(movie);
   const [error, setError] = useState("");
@@ -62,15 +71,16 @@ export default function MovieSheet({
             <X size={21} />
           </Dialog.Close>
           <div className="sheet-body">
-            <Genres item={detail} />
             <Dialog.Title>{detail.title}</Dialog.Title>
             <Meta item={detail} source={source} />
+            <Genres item={detail} />
             <button
               className="primary-button"
               disabled={Boolean(error)}
               onClick={() => onPlay(detail)}
             >
-              <Play size={18} fill="currentColor" /> Play / Resume
+              <Play size={18} fill="currentColor" />{" "}
+              {movie.position_ticks ? "Resume" : "Play"}
             </button>
             <Dialog.Description id="movie-synopsis" className="sheet-synopsis">
               {detail.overview || "No synopsis available yet."}
@@ -132,6 +142,59 @@ export default function MovieSheet({
                 )}
               </div>
             </div>
+            {admin && (
+              <details className="collection-edit">
+                <summary>Manage collection</summary>
+                <p>
+                  Add this movie to an existing collection, or enter a new
+                  collection name.
+                </p>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setSaving(true);
+                    setCollectionStatus("");
+                    void api(
+                      "/api/v1/movies/" + idPath(movie.id) + "/collection",
+                      {
+                        method: "POST",
+                        body: JSON.stringify({ name: collectionName }),
+                      },
+                    )
+                      .then(() => {
+                        setCollectionStatus("Added to collection.");
+                        onCollectionChanged();
+                      })
+                      .catch((e) => setCollectionStatus(message(e)))
+                      .finally(() => setSaving(false));
+                  }}
+                >
+                  <label>
+                    Collection name
+                    <input
+                      list="collection-names"
+                      value={collectionName}
+                      onChange={(e) => setCollectionName(e.target.value)}
+                      maxLength={120}
+                      required
+                      disabled={saving}
+                    />
+                  </label>
+                  <datalist id="collection-names">
+                    {collections.map((c) => (
+                      <option key={c.id} value={c.title} />
+                    ))}
+                  </datalist>
+                  <button
+                    className="secondary-button"
+                    disabled={saving || !collectionName.trim()}
+                  >
+                    {saving ? "Adding…" : "Add to collection"}
+                  </button>
+                  <p role="status">{collectionStatus}</p>
+                </form>
+              </details>
+            )}
           </div>
         </Dialog.Content>
       </Dialog.Portal>

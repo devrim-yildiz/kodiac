@@ -8,53 +8,32 @@ test.beforeEach(async ({ page }) => {
     .fill("ui-test-password-only");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Just arrived", exact: true }),
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
 });
-test("press wins over elevation and shelves retain native snapping", async ({
+test("posters have restrained hover feedback and native shelf scrolling", async ({
   page,
 }) => {
   const card = page.locator(".cinematic-shelf .title-card").first();
+  const poster = card.locator(".poster-wrap");
   await card.hover();
   await expect
     .poll(() =>
-      card.evaluate((e) => new DOMMatrix(getComputedStyle(e).transform).m11),
+      poster.evaluate((e) => new DOMMatrix(getComputedStyle(e).transform).m42),
     )
-    .toBeCloseTo(1.05, 2);
+    .toBeLessThan(-3);
   await page.mouse.down();
   await expect
     .poll(() =>
-      card.evaluate((e) => new DOMMatrix(getComputedStyle(e).transform).m11),
+      poster.evaluate((e) => new DOMMatrix(getComputedStyle(e).transform).m11),
     )
-    .toBeCloseTo(0.97, 2);
-  await page.screenshot({
-    path: "../validation/apple-fluid/fixture-card-pressed.png",
-  });
+    .toBeCloseTo(0.98, 2);
   await page.mouse.move(0, 0);
   await page.mouse.up();
   await expect(page.locator(".cinematic-shelf").first()).toHaveCSS(
     "scroll-snap-type",
-    "x mandatory",
+    "x",
   );
-  const optical = await page.locator(".hero h1").evaluate((e) => {
-    const s = getComputedStyle(e);
-    return {
-      tracking: parseFloat(s.letterSpacing) / parseFloat(s.fontSize),
-      leading: parseFloat(s.lineHeight) / parseFloat(s.fontSize),
-    };
-  });
-  expect(optical.tracking).toBeCloseTo(-0.025, 3);
-  expect(optical.leading).toBeCloseTo(1.04, 2);
-  for (const selector of [".metadata", ".section-heading .eyebrow"]) {
-    const tracking = await page
-      .locator(selector)
-      .first()
-      .evaluate((e) => {
-        const s = getComputedStyle(e);
-        return parseFloat(s.letterSpacing) / parseFloat(s.fontSize);
-      });
-    expect(tracking).toBeCloseTo(0.02, 3);
-  }
 });
 test("sheet reversal and settings leave the persistent decoder running", async ({
   page,
@@ -96,10 +75,12 @@ test("sheet reversal and settings leave the persistent decoder running", async (
   await page
     .getByRole("button", { name: "Open settings", exact: true })
     .click();
-  await expect(page.locator(".settings-panel")).toBeVisible();
-  await page.getByRole("tab", { name: "Streaming & Playback" }).click();
-  await page.keyboard.press("Escape");
-  await expect(page.locator(".settings-panel")).toHaveCount(0);
+  await expect(page.locator(".settings-page")).toBeVisible();
+  await page.getByRole("button", { name: "Playback", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Back to library", exact: true })
+    .click();
+  await expect(page.locator(".settings-page")).toHaveCount(0);
   await expect
     .poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime))
     .toBeGreaterThan(before);

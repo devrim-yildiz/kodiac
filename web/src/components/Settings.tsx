@@ -1,17 +1,18 @@
 import { useEffect, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
-import * as Tabs from "@radix-ui/react-tabs";
 import {
-  X,
-  SlidersHorizontal,
-  Database,
-  Clapperboard,
-  Activity,
+  ArrowDown,
+  ArrowLeft,
+  ArrowUp,
   Check,
+  ChevronRight,
+  RefreshCw,
   LoaderCircle,
+  Plus,
 } from "lucide-react";
-import { useSpatialPresence } from "./useSpatialPresence";
 import { api, message } from "../api";
+import { useSession } from "../store";
+import type { Preferences, User } from "../types";
+
 type Config = {
   values: Record<string, string>;
   tmdb_configured: boolean;
@@ -21,63 +22,124 @@ type Config = {
 type Stats = {
   version: string;
   architecture: string;
-  rust_edition: string;
   ffmpeg: string;
   uptime_seconds: number;
   db_bytes: number;
-  wal_bytes: number;
   artwork_bytes: number | null;
   workers?: { name: string; status: string; updated_at: number }[];
   media_count: number;
-  extracted_count: number;
   metadata_pending: number;
   scan: { running: boolean; indexed: number; phase: string; failed?: number };
   active_streams: { title: string; profile: string }[];
   logs: string[];
 };
-const bytes = (n: number | null = 0) =>
-  n === null
+const bytes = (n?: number | null) =>
+  n == null
     ? "Unavailable"
     : n < 1048576
       ? `${(n / 1024).toFixed(1)} KB`
       : `${(n / 1048576).toFixed(1)} MB`;
+export const homeLabels: Record<string, string> = {
+  continue: "Continue watching",
+  collections: "Collections",
+  recommended: "Recommended for you",
+  top: "Top rated",
+  series: "Unwatched series",
+  recent: "Recently added",
+};
+const languages = [
+  ["eng", "English"],
+  ["deu", "German"],
+  ["fra", "French"],
+  ["spa", "Spanish"],
+  ["jpn", "Japanese"],
+  ["ita", "Italian"],
+];
+
 export function Settings({
-  open,
   onClose,
+  onPreferences,
+  onDirtyChange,
 }: {
-  open: boolean;
   onClose: () => void;
+  onPreferences: (p: Preferences) => void;
+  onDirtyChange: (dirty: boolean) => void;
 }) {
-  const spatial = useSpatialPresence(open);
-  const [c, setC] = useState<Config | null>(null),
-    [stats, setStats] = useState<Stats | null>(null),
-    [key, setKey] = useState(""),
-    [status, setStatus] = useState(""),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
+  const user = useSession((s) => s.user)!;
+  const [tab, setTab] = useState("");
+  const [statsRevision, setStatsRevision] = useState(0);
+  const [statsError, setStatsError] = useState("");
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [usersLoaded, setUsersLoaded] = useState(false);
+  const [p, setP] = useState<Preferences | null>(null);
+  const [c, setC] = useState<Config | null>(null);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [key, setKey] = useState("");
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [dirty, setDirty] = useState(false);
   useEffect(() => {
-    if (!open) return;
+    onDirtyChange(dirty);
+    return () => onDirtyChange(false);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+  useEffect(() => {
     const a = new AbortController();
-    api<Config>("/api/v1/settings", { signal: a.signal })
-      .then(setC)
+    api<Preferences>("/api/v1/preferences", { signal: a.signal })
+      .then(setP)
       .catch((e) => {
         if (!a.signal.aborted) setError(message(e));
       });
-    const refresh = () =>
-      api<Stats>("/api/v1/settings/stats", { signal: a.signal })
-        .then(setStats)
+    if (user.is_admin)
+      api<Config>("/api/v1/settings", { signal: a.signal })
+        .then(setC)
         .catch((e) => {
           if (!a.signal.aborted) setError(message(e));
         });
-    void refresh();
-    const timer = setInterval(refresh, 3000);
+    return () => a.abort();
+  }, [user.id, user.is_admin]);
+  useEffect(() => {
+    if (
+      !user.is_admin ||
+      !["", "server", "system", "library", "users"].includes(tab)
+    )
+      return;
+    const a = new AbortController();
+    const refresh = () => {
+      if (tab === "users")
+        return api<{ items: User[] }>("/api/v1/users", {
+          signal: a.signal,
+        }).then((r) => {
+          setUsers(r.items);
+          setUsersLoaded(true);
+          setStatsError("");
+        });
+      return api<Stats>("/api/v1/settings/stats", { signal: a.signal }).then(
+        (value) => {
+          setStats(value);
+          setUpdatedAt(Date.now());
+          setStatsError("");
+        },
+      );
+    };
+    const run = () =>
+      void refresh().catch((e) => {
+        if (!a.signal.aborted) setStatsError(message(e));
+      });
+    run();
+    const timer = tab === "users" ? undefined : setInterval(run, 10000);
     return () => {
       a.abort();
       clearInterval(timer);
     };
-  }, [open]);
-  const update = (k: string, v: string) =>
-    setC((c) => (c ? { ...c, values: { ...c.values, [k]: v } } : c));
+  }, [tab, user.is_admin, statsRevision]);
   const action = async (fn: () => Promise<void>) => {
     setBusy(true);
     setError("");
@@ -90,347 +152,726 @@ export function Settings({
       setBusy(false);
     }
   };
-  const save = async (enrich = false) => {
-    if (!c) return;
-    const values = { ...c.values, ...(key ? { tmdb_api_key: key } : {}) };
-    const saved = await api<Config>("/api/v1/settings", {
-      method: "POST",
-      body: JSON.stringify(values),
-    });
-    setC(saved);
-    setKey("");
-    if (enrich) await api("/api/v1/settings/rescan", { method: "POST" });
-    setStatus(
-      enrich
-        ? "Saved. Library enrichment queued."
-        : "Your preferences are saved.",
-    );
+  const updateP = (values: Partial<Preferences>) => {
+    setP((p) => (p ? { ...p, ...values } : p));
+    setDirty(true);
+    setStatus("");
   };
+  const update = (k: string, v: string) => {
+    setC((c) => (c ? { ...c, values: { ...c.values, [k]: v } } : c));
+    setDirty(true);
+    setStatus("");
+  };
+  const save = () =>
+    action(async () => {
+      if (tab === "home" || tab === "playback") {
+        if (!p) return;
+        const saved = await api<Preferences>("/api/v1/preferences", {
+          method: "PUT",
+          body: JSON.stringify(p),
+        });
+        setP(saved);
+        onPreferences(saved);
+      } else {
+        if (!c) return;
+        setC(
+          await api<Config>("/api/v1/settings", {
+            method: "POST",
+            body: JSON.stringify({
+              ...c.values,
+              ...(key ? { tmdb_api_key: key } : {}),
+            }),
+          }),
+        );
+        setKey("");
+      }
+      setDirty(false);
+      setStatus("Changes saved.");
+    });
+  const go = (next: string) => {
+    if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    // Reload discarded edits so switching back never resurrects unsaved values.
+    if (dirty) {
+      void api<Preferences>("/api/v1/preferences")
+        .then(setP)
+        .catch((e) => setError(message(e)));
+      if (user.is_admin)
+        void api<Config>("/api/v1/settings")
+          .then(setC)
+          .catch((e) => setError(message(e)));
+    }
+    setTab(next);
+    setDirty(false);
+    setError("");
+    setStatus("");
+    setKey("");
+    window.scrollTo({ top: 0 });
+  };
+  const ordered = p
+    ? [
+        ...p.home_sections,
+        ...Object.keys(homeLabels).filter((k) => !p.home_sections.includes(k)),
+      ]
+    : [];
+  const move = (id: string, delta: number) => {
+    if (!p) return;
+    const sections = [...p.home_sections];
+    const i = sections.indexOf(id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= sections.length) return;
+    [sections[i], sections[j]] = [sections[j], sections[i]];
+    updateP({ home_sections: sections });
+  };
+  const sections = [
+    [
+      "Personal",
+      [
+        ["home", "Home screen"],
+        ["playback", "Playback"],
+      ],
+    ],
+    ...(user.is_admin
+      ? [
+          [
+            "Server",
+            [
+              ["server", "Server overview"],
+              ["library", "Libraries"],
+              ["metadata", "Metadata"],
+              ["encoding", "Transcoding"],
+              ["users", "Users"],
+              ["system", "Diagnostics"],
+            ],
+          ],
+        ]
+      : []),
+  ] as [string, string[][]][];
+  const titles: Record<string, string> = {
+    "": "Overview",
+    server: "Server overview",
+    home: "Home screen",
+    playback: "Playback",
+    library: "Libraries",
+    metadata: "Metadata",
+    encoding: "Transcoding",
+    users: "Users",
+    system: "Diagnostics",
+  };
+  const descriptions: Record<string, string> = {
+    playback: p
+      ? `${languages.find(([id]) => id === p.audio_language_preference)?.[1] || p.audio_language_preference} audio`
+      : "Audio and subtitles",
+    home: p ? `${p.home_sections.length} enabled rows` : "Rows and order",
+    server: stats
+      ? `${stats.active_streams.length} active streams`
+      : "Status and activity",
+    library: "Media folders and scans",
+    metadata: c?.tmdb_configured ? "TMDB connected" : "Information and artwork",
+    encoding: "Hardware and encoding",
+    users: "Accounts and access",
+    system: "Version and server events",
+  };
+  const workerState = (w: NonNullable<Stats["workers"]>[number]) =>
+    !["paused", "stopped"].includes(w.status) &&
+    Date.now() / 1000 - w.updated_at > 30
+      ? "Not responding"
+      : w.status.replaceAll("_", " ");
   return (
-    <Dialog.Root
-      open={spatial.present}
-      onOpenChange={(v) => {
-        if (!v) onClose();
-      }}
+    <main
+      className={`settings-page content-width ${tab ? "is-detail" : "is-overview"}`}
     >
-      <Dialog.Portal>
-        <Dialog.Overlay ref={spatial.overlay} className="dialog-overlay" />
-        <Dialog.Content ref={spatial.panel} className="settings-panel glass">
-          <header className="settings-header">
-            <div>
-              <span className="eyebrow">MAKE YOURSELF AT HOME</span>
-              <Dialog.Title>Your cinema, your way.</Dialog.Title>
-              <Dialog.Description>
-                Fine-tune your library and every moment of playback.
-              </Dialog.Description>
-            </div>
-            <Dialog.Close className="icon-button" aria-label="Close settings">
-              <X />
-            </Dialog.Close>
-          </header>
-          <Tabs.Root defaultValue="general" className="settings-layout">
-            <Tabs.List className="settings-tabs" aria-label="Settings sections">
-              {(
-                [
-                  ["general", "General & Metadata", SlidersHorizontal],
-                  ["library", "Library & Storage", Database],
-                  ["playback", "Streaming & Playback", Clapperboard],
-                  ["system", "System & Diagnostics", Activity],
-                ] as const
-              ).map(([id, label, Icon]) => (
-                <Tabs.Trigger key={String(id)} value={String(id)}>
-                  <Icon size={17} />
-                  <span>{String(label)}</span>
-                </Tabs.Trigger>
+      <header className="settings-page-header">
+        <button
+          className="back-link settings-exit"
+          onClick={() => {
+            if (!dirty || window.confirm("Discard unsaved changes?")) onClose();
+          }}
+        >
+          <ArrowLeft size={17} /> Back to library
+        </button>
+        {tab && (
+          <button
+            className="back-link settings-mobile-back"
+            onClick={() => go("")}
+          >
+            <ArrowLeft size={17} /> Settings
+          </button>
+        )}
+        <h1>Settings</h1>
+      </header>
+      <div className="settings-layout">
+        <nav className="settings-tabs" aria-label="Settings sections">
+          <button
+            aria-current={!tab ? "page" : undefined}
+            onClick={() => go("")}
+          >
+            Overview
+          </button>
+          {sections.map(([group, tabs]) => (
+            <div key={group}>
+              <h2>{group}</h2>
+              {tabs.map(([id, label]) => (
+                <button
+                  key={id}
+                  aria-current={tab === id ? "page" : undefined}
+                  onClick={() => go(id)}
+                >
+                  {label}
+                </button>
               ))}
-            </Tabs.List>
-            <div className="settings-body">
-              <Tabs.Content value="general">
-                <span className="eyebrow">A LIBRARY WITH A STORY</span>
-                <h2>Bring every title to life.</h2>
-                <p>
-                  Rich artwork, the people behind the story, and the details
-                  that make choosing effortless.
-                </p>
-                <label>
-                  TMDB API key
-                  <span className="field-hint">
-                    {c?.tmdb_configured
-                      ? "A key is securely stored. Enter a replacement to update it."
-                      : "Connect your TMDB account for posters, ratings and cast."}
-                  </span>
-                  <div className="input-action">
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      value={key}
-                      onChange={(e) => setKey(e.target.value)}
-                      placeholder={
-                        c?.tmdb_configured
-                          ? "••••••••"
-                          : "Enter API key or read access token"
-                      }
-                    />
-                    <button
-                      className="secondary-button"
-                      disabled={busy}
-                      onClick={() =>
-                        void action(async () => {
-                          const r = await api<{ valid: boolean }>(
-                            "/api/v1/settings/verify",
-                            {
-                              method: "POST",
-                              body: JSON.stringify({ tmdb_api_key: key }),
-                            },
-                          );
-                          if (!r.valid)
-                            throw new Error(
-                              "The key could not be verified. Check the key and server connection.",
-                            );
-                          setStatus("TMDB key verified.");
-                        })
-                      }
-                    >
-                      Verify key
-                    </button>
-                  </div>
-                </label>
-                <label className="toggle-row">
-                  <div>
-                    <strong>Always find the scene</strong>
-                    <span className="field-hint">
-                      Extract a cinematic frame with FFmpeg when artwork is
-                      missing.
-                    </span>
-                  </div>
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    checked={c?.values.thumbnail_fallback !== "false"}
-                    onChange={(e) =>
-                      update("thumbnail_fallback", String(e.target.checked))
-                    }
-                  />
-                </label>
-                <div className="settings-note">
-                  Artwork cache <code>{c?.metadata_path}</code>
-                </div>
-                <button
-                  className="primary-button"
-                  disabled={busy || !c}
-                  onClick={() => void action(() => save(true))}
-                >
-                  Save & Enrich Library Now
-                </button>
-              </Tabs.Content>
-              <Tabs.Content value="library">
-                <span className="eyebrow">ALL YOUR STORIES, TOGETHER</span>
-                <h2>Room for your collection.</h2>
-                <p>Your monitored folders are mounted by the server.</p>
-                <div className="path-list">
-                  {c?.library_paths.map((p) => (
-                    <div key={p}>
-                      <Database size={16} />
-                      <code>{p}</code>
-                      <span>MONITORED</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="storage-grid">
-                  <div>
-                    <strong>{bytes(stats?.db_bytes)}</strong>
-                    <span>SQLite database</span>
-                  </div>
-                  <div>
-                    <strong>{bytes(stats?.artwork_bytes)}</strong>
-                    <span>Artwork cache</span>
-                  </div>
-                  <div>
-                    <strong>{stats?.extracted_count ?? "—"}</strong>
-                    <span>Extracted scenes</span>
-                  </div>
-                </div>
-                <button
-                  className="primary-button"
-                  disabled={busy || stats?.scan.running}
-                  onClick={() =>
-                    void action(async () => {
-                      await api("/api/v1/settings/rescan", { method: "POST" });
-                      setStatus("Library scan started.");
-                    })
-                  }
-                >
-                  {stats?.scan.running ? (
-                    <LoaderCircle className="spin" size={17} />
-                  ) : (
-                    <Database size={17} />
-                  )}
-                  Scan Libraries
-                </button>
-                <div className="scan-status" role="status">
-                  <strong>{stats?.scan.phase || "Ready to scan"}</strong>
+            </div>
+          ))}
+        </nav>
+        <section className="settings-body" aria-label={titles[tab]}>
+          {tab && <h2 tabIndex={-1}>{titles[tab]}</h2>}
+          {statsError && (
+            <div className="settings-alert" role="alert">
+              <span>Server data could not refresh. {statsError}</span>
+              <button
+                className="text-button"
+                onClick={() => setStatsRevision((n) => n + 1)}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {!tab && (
+            <div className="settings-overview">
+              <div className="settings-account">
+                <span className="avatar">
+                  {user.username.slice(0, 1).toUpperCase()}
+                </span>
+                <div>
+                  <strong>{user.username}</strong>
                   <p>
-                    {stats?.scan.indexed ?? 0} indexed ·{" "}
-                    {stats?.scan.failed ?? 0} failed ·{" "}
-                    {stats?.metadata_pending ?? 0} metadata jobs pending
+                    {user.is_admin
+                      ? "Administrator account"
+                      : "Personal account"}
                   </p>
-                  {stats?.scan.running && (
-                    <progress aria-label="Scanning library" />
-                  )}
                 </div>
-              </Tabs.Content>
-              <Tabs.Content value="playback">
-                <span className="eyebrow">PRESS PLAY. SETTLE IN.</span>
-                <h2>A seamless first frame.</h2>
-                <p>Defaults apply to the next playback session.</p>
-                <label>
-                  Hardware acceleration
-                  <select
-                    value={c?.values.hw_accel || "auto"}
-                    onChange={(e) => update("hw_accel", e.target.value)}
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="software">Software</option>
-                    <option value="vaapi">VAAPI</option>
-                    <option value="videotoolbox">VideoToolbox</option>
-                  </select>
-                </label>
-                <label>
-                  Software encoding preset
-                  <select
-                    value={c?.values.transcode_preset || "ultrafast"}
-                    onChange={(e) => update("transcode_preset", e.target.value)}
-                  >
-                    {[
-                      "ultrafast",
-                      "superfast",
-                      "veryfast",
-                      "fast",
-                      "medium",
-                    ].map((p) => (
-                      <option key={p}>{p}</option>
+              </div>
+              {sections.map(([group, tabs]) => (
+                <section className="settings-category" key={group}>
+                  <h2>
+                    {group === "Server" ? "Server administration" : "Personal"}
+                  </h2>
+                  <div className="settings-group">
+                    {tabs.map(([id, label]) => (
+                      <button
+                        className="settings-destination"
+                        aria-label={`Open ${label.toLowerCase()}`}
+                        key={id}
+                        onClick={() => go(id)}
+                      >
+                        <span>{label}</span>
+                        <span className="destination-description">
+                          {descriptions[id]}
+                        </span>
+                        <ChevronRight size={17} />
+                      </button>
                     ))}
-                  </select>
-                </label>
-                <label>
-                  Preferred audio language
-                  <select
-                    value={c?.values.audio_language_preference || "eng"}
-                    onChange={(e) =>
-                      update("audio_language_preference", e.target.value)
-                    }
-                  >
-                    {[
-                      ["deu", "German"],
-                      ["eng", "English"],
-                      ["fra", "French"],
-                      ["spa", "Spanish"],
-                      ["jpn", "Japanese"],
-                      ["ita", "Italian"],
-                    ].map(([id, label]) => (
-                      <option value={id} key={id}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Subtitles
-                  <select
-                    value={c?.values.subtitle_mode || "off"}
-                    onChange={(e) => update("subtitle_mode", e.target.value)}
-                  >
-                    <option value="off">Off</option>
-                    <option value="forced">Forced only</option>
-                    <option value="always">Always on</option>
-                  </select>
-                </label>
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+          {tab === "server" && (
+            <>
+              <div className="server-refresh">
+                <span>
+                  {updatedAt
+                    ? `Updated ${new Date(updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                    : "Loading server status…"}
+                </span>
                 <button
-                  className="primary-button"
-                  disabled={busy || !c}
-                  onClick={() => void action(() => save())}
+                  className="icon-button"
+                  aria-label="Refresh server stats"
+                  onClick={() => setStatsRevision((n) => n + 1)}
                 >
-                  Save playback preferences
+                  <RefreshCw size={17} />
                 </button>
-              </Tabs.Content>
-              <Tabs.Content value="system">
-                <span className="eyebrow">BEHIND THE SCREEN</span>
-                <h2>Everything in harmony.</h2>
-                <div className="system-grid">
-                  {[
-                    ["Release", `v${stats?.version || "1.1.0"}`],
-                    ["Rust edition", stats?.rust_edition],
-                    ["Architecture", stats?.architecture],
-                    [
-                      "Uptime",
-                      `${Math.floor((stats?.uptime_seconds || 0) / 60)} minutes`,
-                    ],
-                    ["Media files", stats?.media_count?.toLocaleString()],
-                    ["SQLite WAL", bytes(stats?.wal_bytes)],
-                  ].map(([k, v]) => (
-                    <div key={k}>
-                      <span>{k}</span>
-                      <strong>{v || "—"}</strong>
-                    </div>
-                  ))}
-                </div>
-                <p className="ffmpeg-version">{stats?.ffmpeg}</p>
+              </div>
+              <dl className="server-facts settings-group">
+                {[
+                  [
+                    "Uptime",
+                    stats
+                      ? `${Math.floor(stats.uptime_seconds / 86400)}d ${Math.floor((stats.uptime_seconds % 86400) / 3600)}h ${Math.floor((stats.uptime_seconds % 3600) / 60)}m`
+                      : "—",
+                  ],
+                  ["Media files", stats?.media_count?.toLocaleString() ?? "—"],
+                  ["Active streams", stats?.active_streams.length ?? "—"],
+                  [
+                    "Metadata queue",
+                    stats?.metadata_pending?.toLocaleString() ?? "—",
+                  ],
+                  ["Database", stats ? bytes(stats.db_bytes) : "—"],
+                  ["Artwork cache", stats ? bytes(stats.artwork_bytes) : "—"],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <h3>Background workers</h3>
+              <div className="settings-group worker-list">
                 {stats?.workers?.length ? (
-                  <>
-                    <h3>Background jobs</h3>
-                    <div className="system-grid">
-                      {stats.workers.map((worker) => (
-                        <div key={worker.name}>
-                          <span>{worker.name}</span>
-                          <strong>
-                            {!["paused", "stopped"].includes(worker.status) &&
-                            Date.now() / 1000 - worker.updated_at > 30
-                              ? "Not responding"
-                              : worker.status}
-                          </strong>
-                        </div>
-                      ))}
+                  stats.workers.map((w) => (
+                    <div className="preference-row" key={w.name}>
+                      <span>{w.name}</span>
+                      <span
+                        className={`worker-state ${workerState(w) === "Not responding" ? "is-warning" : ""}`}
+                      >
+                        {workerState(w)}
+                      </span>
                     </div>
-                  </>
-                ) : null}
-                <h3>Active streaming sessions</h3>
-                {stats?.active_streams.length ? (
-                  stats.active_streams.map((s, i) => (
-                    <p key={i}>
-                      {s.title} · {s.profile}
-                    </p>
                   ))
                 ) : (
-                  <p>No streams playing right now.</p>
+                  <p className="settings-empty">
+                    {stats ? "No worker status reported." : "Loading workers…"}
+                  </p>
                 )}
-                <h3>Recent server events</h3>
-                <pre className="server-logs">
-                  {stats?.logs.join("\n") || "No recent events."}
-                </pre>
-              </Tabs.Content>
+              </div>
+              <h3>Streaming now</h3>
+              <div className="settings-group">
+                {stats?.active_streams.length ? (
+                  stats.active_streams.map((stream, i) => (
+                    <div className="stream-row" key={i}>
+                      <strong>{stream.title}</strong>
+                      <span>{stream.profile}</span>
+                    </div>
+                  ))
+                ) : (
+                  <p className="settings-empty">
+                    {stats ? "No active streams." : "Loading streams…"}
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+          {tab === "home" && (
+            <>
+              <p>Choose and reorder the rows shown on Home.</p>
+              {!p ? (
+                <p>Loading preferences…</p>
+              ) : (
+                <div className="home-order settings-group">
+                  {ordered.map((id) => {
+                    const i = p.home_sections.indexOf(id);
+                    return (
+                      <div className="preference-row" key={id}>
+                        <label className="check-label">
+                          <input
+                            type="checkbox"
+                            disabled={busy}
+                            checked={i >= 0}
+                            onChange={(e) =>
+                              updateP({
+                                home_sections: e.target.checked
+                                  ? [...p.home_sections, id]
+                                  : p.home_sections.filter((k) => k !== id),
+                              })
+                            }
+                          />
+                          {homeLabels[id]}
+                        </label>
+                        <div className="reorder-actions">
+                          <button
+                            className="icon-button"
+                            disabled={busy || i <= 0}
+                            aria-label={`Move ${homeLabels[id]} up`}
+                            onClick={() => move(id, -1)}
+                          >
+                            <ArrowUp size={17} />
+                          </button>
+                          <button
+                            className="icon-button"
+                            disabled={
+                              busy || i < 0 || i === p.home_sections.length - 1
+                            }
+                            aria-label={`Move ${homeLabels[id]} down`}
+                            onClick={() => move(id, 1)}
+                          >
+                            <ArrowDown size={17} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+          {tab === "playback" && (
+            <div className="settings-fields settings-group">
+              <p>Your defaults apply when you start a video.</p>
+              <label>
+                Preferred audio language
+                <select
+                  disabled={!p || busy}
+                  value={p?.audio_language_preference || "eng"}
+                  onChange={(e) =>
+                    updateP({ audio_language_preference: e.target.value })
+                  }
+                >
+                  {languages.map(([id, label]) => (
+                    <option key={id} value={id}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Subtitles
+                <select
+                  disabled={!p || busy}
+                  value={p?.subtitle_mode || "off"}
+                  onChange={(e) => updateP({ subtitle_mode: e.target.value })}
+                >
+                  <option value="off">Off</option>
+                  <option value="forced">Forced only</option>
+                  <option value="always">Always on</option>
+                </select>
+              </label>
+              <p className="field-hint">
+                Audio and subtitle tracks can also be changed in the player.
+              </p>
             </div>
-          </Tabs.Root>
-          <footer className="settings-footer" aria-live="polite">
-            {busy ? (
-              <>
-                <LoaderCircle size={15} className="spin" />
-                Working…
-              </>
-            ) : error ? (
-              <span role="alert" className="inline-error">
-                {error}
-              </span>
-            ) : status ? (
-              <>
-                <Check size={15} />
-                {status}
-              </>
-            ) : (
-              <span>KODIAC · CINEMATIC LUXURY · v1.1.0</span>
+          )}
+          {tab === "metadata" && (
+            <div className="settings-fields settings-group">
+              <p>
+                Connect TMDB for movie and series information, artwork and
+                collections.
+              </p>
+              <label>
+                TMDB API key
+                <span className="field-hint">
+                  {c?.tmdb_configured
+                    ? "A key is saved. Enter a key to replace it."
+                    : "API key or read access token."}
+                </span>
+                <div className="input-action">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={key}
+                    onChange={(e) => {
+                      setKey(e.target.value);
+                      setDirty(true);
+                    }}
+                    placeholder={c?.tmdb_configured ? "••••••••" : "Enter key"}
+                  />
+                  <button
+                    className="secondary-button"
+                    disabled={busy || !c}
+                    onClick={() =>
+                      void action(async () => {
+                        const r = await api<{ valid: boolean }>(
+                          "/api/v1/settings/verify",
+                          {
+                            method: "POST",
+                            body: JSON.stringify({ tmdb_api_key: key }),
+                          },
+                        );
+                        if (!r.valid)
+                          throw new Error(
+                            "Key could not be verified. Check the key and connection.",
+                          );
+                        setStatus("Key verified. Save to apply it.");
+                      })
+                    }
+                  >
+                    Verify key
+                  </button>
+                </div>
+              </label>
+              <label className="toggle-row">
+                <span>
+                  <strong>Generate missing artwork</strong>
+                  <span className="field-hint">
+                    Use a video frame when no poster or backdrop is available.
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={c?.values.thumbnail_fallback !== "false"}
+                  disabled={!c || busy}
+                  onChange={(e) =>
+                    update("thumbnail_fallback", String(e.target.checked))
+                  }
+                />
+              </label>
+            </div>
+          )}
+          {tab === "encoding" && (
+            <div className="settings-fields settings-group">
+              <p>
+                Server encoding options. Original files play directly whenever
+                supported.
+              </p>
+              <label>
+                Hardware acceleration
+                <select
+                  disabled={!c || busy}
+                  value={c?.values.hw_accel || "auto"}
+                  onChange={(e) => update("hw_accel", e.target.value)}
+                >
+                  {[
+                    "auto",
+                    "software",
+                    "vaapi",
+                    "nvenc",
+                    "qsv",
+                    "amf",
+                    "videotoolbox",
+                  ].map((v) => (
+                    <option key={v} value={v}>
+                      {v === "auto"
+                        ? "Automatic"
+                        : v === "software"
+                          ? "Software"
+                          : v.toUpperCase()}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Software encoding preset
+                <select
+                  disabled={!c || busy}
+                  value={c?.values.transcode_preset || "ultrafast"}
+                  onChange={(e) => update("transcode_preset", e.target.value)}
+                >
+                  {["ultrafast", "superfast", "veryfast", "fast", "medium"].map(
+                    (v) => (
+                      <option key={v}>{v}</option>
+                    ),
+                  )}
+                </select>
+                <span className="field-hint">
+                  Slower presets use more CPU and can reduce bandwidth.
+                </span>
+              </label>
+            </div>
+          )}
+          {tab === "library" && (
+            <>
+              <p>
+                Media folders are configured through the server's mounted
+                volumes.
+              </p>
+              <div className="path-list settings-group">
+                {c?.library_paths.map((path) => (
+                  <div key={path}>
+                    <strong>
+                      {path.split(/[\\/]/).filter(Boolean).at(-1)}
+                    </strong>
+                    <code>{path}</code>
+                  </div>
+                ))}
+              </div>
+              <button
+                className="secondary-button"
+                disabled={busy || !stats || stats.scan.running}
+                onClick={() =>
+                  void action(async () => {
+                    await api("/api/v1/settings/rescan", { method: "POST" });
+                    setStatus(
+                      "Scan requested. Background workers will update the library.",
+                    );
+                  })
+                }
+              >
+                {stats?.scan.running ? "Scanning…" : "Scan libraries"}
+              </button>
+              <div className="scan-status">
+                <strong>{stats?.scan.phase || "Loading scan status…"}</strong>
+                <p>
+                  {stats?.scan.indexed ?? "—"} indexed ·{" "}
+                  {stats?.scan.failed ?? "—"} failed ·{" "}
+                  {stats?.metadata_pending ?? "—"} metadata jobs pending
+                </p>
+              </div>
+              <details>
+                <summary>Storage details</summary>
+                <p>Artwork path</p>
+                <code>{c?.metadata_path}</code>
+              </details>
+            </>
+          )}
+          {tab === "users" && (
+            <>
+              <p>
+                Each account has its own profiles, progress and preferences.
+              </p>
+              <div className="user-list settings-group">
+                {users.map((account) => (
+                  <div className="preference-row" key={account.id}>
+                    <span>
+                      <strong>{account.username}</strong>
+                      {account.id === user.id && <small> You</small>}
+                    </span>
+                    <label className="sr-only" htmlFor={`role-${account.id}`}>
+                      Role for {account.username}
+                    </label>
+                    <select
+                      id={`role-${account.id}`}
+                      disabled={busy || account.id === user.id}
+                      value={String(account.is_admin)}
+                      onChange={(e) => {
+                        const is_admin = e.target.value === "true";
+                        void action(async () => {
+                          await api(
+                            `/api/v1/users/${encodeURIComponent(account.id)}/role`,
+                            {
+                              method: "PUT",
+                              body: JSON.stringify({ is_admin }),
+                            },
+                          );
+                          setUsers((rows) =>
+                            rows.map((row) =>
+                              row.id === account.id
+                                ? { ...row, is_admin }
+                                : row,
+                            ),
+                          );
+                          setStatus("Role updated.");
+                        });
+                      }}
+                    >
+                      <option value="false">User</option>
+                      <option value="true">Administrator</option>
+                    </select>
+                  </div>
+                ))}
+              </div>
+              {!usersLoaded && !statsError && (
+                <p className="settings-empty" role="status">
+                  Loading accounts…
+                </p>
+              )}
+              <details className="create-account">
+                <summary>
+                  <Plus size={17} /> Create account
+                </summary>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const data = new FormData(form);
+                    void action(async () => {
+                      const created = await api<User>("/api/v1/users", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          username: data.get("username"),
+                          password: data.get("password"),
+                          is_admin: data.get("role") === "admin",
+                        }),
+                      });
+                      setUsers((rows) => [...rows, created]);
+                      form.reset();
+                      setStatus(`Account created for ${created.username}.`);
+                    });
+                  }}
+                >
+                  <label>
+                    Username
+                    <input
+                      name="username"
+                      autoComplete="off"
+                      maxLength={80}
+                      required
+                      disabled={busy}
+                    />
+                  </label>
+                  <label>
+                    Initial password
+                    <input
+                      aria-label="Initial password"
+                      name="password"
+                      type="password"
+                      autoComplete="new-password"
+                      minLength={12}
+                      maxLength={1024}
+                      required
+                      disabled={busy}
+                    />
+                    <span className="field-hint">
+                      At least 12 characters. Share it privately with the
+                      account owner.
+                    </span>
+                  </label>
+                  <label>
+                    Account role
+                    <select name="role" disabled={busy}>
+                      <option value="user">User</option>
+                      <option value="admin">Administrator</option>
+                    </select>
+                  </label>
+                  <button className="primary-button" disabled={busy}>
+                    <Plus size={17} /> Create account
+                  </button>
+                </form>
+              </details>
+            </>
+          )}
+          {tab === "system" && (
+            <>
+              <dl className="server-facts settings-group">
+                <div>
+                  <dt>Version</dt>
+                  <dd>{stats?.version ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>Architecture</dt>
+                  <dd>{stats?.architecture ?? "—"}</dd>
+                </div>
+              </dl>
+              <details className="settings-diagnostics">
+                <summary>FFmpeg</summary>
+                <p>{stats?.ffmpeg || "Loading encoder information…"}</p>
+              </details>
+              <h3>Recent server events</h3>
+              <pre className="server-logs">
+                {stats
+                  ? stats.logs.join("\n") || "No recent events."
+                  : "Loading events…"}
+              </pre>
+            </>
+          )}
+          {["home", "playback", "metadata", "encoding"].includes(tab) &&
+            dirty && (
+              <div className="settings-save">
+                <button
+                  className="primary-button"
+                  disabled={busy || !dirty || !p || (user.is_admin && !c)}
+                  onClick={() => void save()}
+                >
+                  Save changes
+                </button>
+                <span>{dirty ? "Unsaved changes" : "All changes saved"}</span>
+              </div>
             )}
-          </footer>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+          <div className="settings-feedback" aria-live="polite">
+            {busy ? (
+              <span>
+                <LoaderCircle size={16} className="spin" /> Working…
+              </span>
+            ) : error ? (
+              <p role="alert" className="inline-error">
+                {error}
+              </p>
+            ) : status ? (
+              <span>
+                <Check size={16} /> {status}
+              </span>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    </main>
   );
 }

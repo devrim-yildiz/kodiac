@@ -1,4 +1,3 @@
-import { ThemeMusic } from "./Immersion";
 import { useEffect, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { ArrowLeft, Play } from "lucide-react";
@@ -83,7 +82,6 @@ export default function ShowPage({
     });
   return (
     <main className="show-page">
-      <ThemeMusic showId={show.id} title={show.title} />
       <section className="hero show-hero">
         <Artwork
           src={
@@ -110,15 +108,14 @@ export default function ShowPage({
               className="primary-button"
               onClick={() => play(episodes[0])}
             >
-              <Play size={18} fill="currentColor" /> Watch / Resume
+              <Play size={18} fill="currentColor" /> Play episode
             </button>
           )}
         </div>
       </section>
       <section className="content-width episode-section">
         <SectionHeading
-          eyebrow="ONE MORE EPISODE"
-          title="The story continues"
+          title="Episodes"
           count={String(show.episode_count || episodes.length)}
         />
         {seasons.length > 0 && (

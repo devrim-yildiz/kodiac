@@ -63,7 +63,7 @@ test("5,202 titles use bounded DOM, immediate search and genuine show hierarchy"
     .getByRole("button", { name: "Back to library", exact: true })
     .click();
   await expect(
-    page.getByRole("heading", { name: /^Your series/ }),
+    page.getByRole("heading", { name: "Series", exact: true }),
   ).toBeVisible();
 });
 
@@ -94,8 +94,13 @@ test("movie detail sheet shows accurate genre, quality and stream metadata", asy
 });
 
 async function startFilm(page: Page) {
+  await page.getByLabel("Search your library").fill("Afterlight");
   await page
-    .getByRole("button", { name: "Resume Afterlight", exact: true })
+    .getByRole("button", { name: "Details for Afterlight", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: /^(Play|Resume)$/, exact: true })
     .click();
   const video = page.locator("#persistent-video");
   await expect
@@ -186,6 +191,9 @@ test("audio switching uses ordinal mapping and subtitles survive docking", async
   await page
     .getByRole("button", { name: "Playback settings", exact: true })
     .click();
+  await page
+    .getByRole("menuitem", { name: "Audio & subtitles", exact: true })
+    .click();
   await page.getByRole("menuitemradio", { name: /Deutsch/ }).click();
   await expect
     .poll(() =>
@@ -201,6 +209,9 @@ test("audio switching uses ordinal mapping and subtitles survive docking", async
     .toBe(true);
   await page
     .getByRole("button", { name: "Playback settings", exact: true })
+    .click();
+  await page
+    .getByRole("menuitem", { name: "Audio & subtitles", exact: true })
     .click();
   await page
     .getByRole("menuitemradio", { name: "English", exact: true })
@@ -291,18 +302,18 @@ test("mobile catalog, dialog and mini player stay inside the viewport", async ({
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(390);
   await expect(
-    mini.getByRole("slider", { name: "Playback position", exact: true }),
+    mini.getByRole("button", { name: "Expand player", exact: true }),
   ).toBeVisible();
   await expect(
-    mini.getByRole("slider", { name: "Volume", exact: true }),
-  ).toBeVisible();
+    mini.getByRole("button", { name: "Play", exact: true }),
+  ).not.toBeVisible();
   await page.screenshot({
     path: "../validation/spa/mini-mobile.png",
     fullPage: false,
   });
 });
 
-test("desktop hero and scroll budget remain bounded for the full catalog", async ({
+test("desktop library and scroll budget remain bounded for the full catalog", async ({
   page,
 }) => {
   await page.screenshot({
@@ -450,7 +461,9 @@ test("Anime includes films and shows, search and episode navigation", async ({
   page,
 }) => {
   await page.getByRole("tab", { name: "Anime", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Your anime" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Anime", exact: true }),
+  ).toBeVisible();
   await expect(page.locator(".title-card")).toHaveCount(2);
   await expect(
     page.getByRole("button", {

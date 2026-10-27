@@ -41,30 +41,11 @@ export function Artwork({
           alt=""
           loading={eager ? "eager" : "lazy"}
           decoding="async"
-          onLoad={(e) => {
-            const img = e.currentTarget;
-            try {
-              const canvas = document.createElement("canvas");
-              canvas.width = canvas.height = 1;
-              const c = canvas.getContext("2d");
-              if (!c) return;
-              c.drawImage(img, 0, 0, 1, 1);
-              const [r, g, b] = c.getImageData(0, 0, 1, 1).data;
-              const card = img.closest<HTMLElement>(
-                ".title-card,.hero,.resume-card",
-              );
-              card?.style.setProperty("--ambient", `rgb(${r},${g},${b})`);
-            } catch {
-              /* artwork can still render */
-            }
-          }}
           onError={() => setFailed(true)}
         />
       ) : (
         <div className="artwork-fallback">
-          <span className="artwork-preparing">
-            Scene artwork is being prepared
-          </span>
+          <span className="artwork-preparing">No artwork</span>
           {title && <span>{title}</span>}
         </div>
       )}
@@ -231,7 +212,6 @@ export function TitleCard({
   );
 }
 export function SectionHeading({
-  eyebrow,
   title,
   count,
   children,
@@ -244,7 +224,6 @@ export function SectionHeading({
   return (
     <div className="section-heading">
       <div>
-        {eyebrow && <span className="eyebrow">{eyebrow}</span>}
         <h2>
           {title}
           {count && <span className="heading-count">{count}</span>}

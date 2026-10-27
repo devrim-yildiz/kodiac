@@ -69,6 +69,7 @@ Fresh Unix database files are created with mode 0600; existing modes are preserv
 | `movies` | Source-backed movie presentation records |
 | `profiles` | Account-owned named profiles with one default per account |
 | `playback_history` | Profile/media resume ticks and completion state |
+| `user_preferences` | Account-private playback defaults and ordered Home rows |
 | `playback_sessions` | Legacy account-scoped progress adapter |
 | `collections` and join tables | Movie/show groupings |
 | `tmdb_jobs`, `frame_jobs` | Durable metadata and fallback-artwork jobs |
@@ -110,6 +111,36 @@ Direct play uses the media element; remux/conversion uses MediaSource or
 ManagedMediaSource when supported. Stream reads are backpressured, buffered history
 is pruned, unbuffered seeks restart the source, and progress writes serialize.
 Switching profile/source intentionally starts a new playback session.
+
+Home is separate from the complete, virtualized Movies and Series catalogs.
+Library search and genre filtering operate on the paginated catalog; title,
+release-year and rating sorting have deterministic title/ID tie breakers.
+The selected sort is stored per account in this browser. Home rows and preferred
+audio/subtitle defaults persist on the server per account through
+`GET/PUT /api/v1/preferences`; `/api/v1/playback-defaults` uses those preferences.
+Existing server playback defaults seed accounts without saved preferences.
+
+Settings separate personal preferences from server administration. The first
+administrator still comes from `ADMIN_PASSWORD_FILE`/`ADMIN_PASSWORD` during
+bootstrap; there is no public registration route. Administrators can list/create
+accounts through `/api/v1/users` and update another account's role through
+`PUT /api/v1/users/{id}/role`. Password hashing uses the existing admission budget.
+Roles are checked from persisted data on each request. Own-role changes are
+rejected, and the atomic role update also preserves the final administrator.
+Regular users cannot read server settings, paths, diagnostics or account lists.
+
+Home collection cards show bounded previews with totals. Full membership is
+paginated through `GET /api/v1/collections/{id}`; collections larger than twenty
+films are therefore reachable. Administrators can add a movie to an existing or
+new named collection through `POST /api/v1/movies/{id}/collection`. This augments
+automatic/NFO membership and never guesses matches from a filename. Both nested
+`<set><name>…</name></set>` and older `<set>…</set>` NFO forms are supported.
+
+Player controls disappear after idle viewing, remain visible while paused,
+loading, scrubbing or using menus, and return on pointer/touch/keyboard input.
+Audio/subtitles and playback modes use nested views in one popup so touch users
+never have to navigate off-screen flyouts. Intro skipping requires real chapter
+metadata. Decoder lifetime, seek recovery and serialized progress are unchanged.
 
 ## Storage failures and independent workers
 

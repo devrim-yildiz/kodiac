@@ -15,6 +15,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('SPA_BINARY', ROOT / 'target/release/kodiac'))
 PORT = int(os.environ.get('SPA_TEST_PORT', '18197'))
+BIND = os.environ.get('SPA_TEST_BIND', '127.0.0.1')
 
 
 def artwork(path, title, color, landscape=False):
@@ -46,7 +47,7 @@ def main():
         db = root / 'catalog.db'
         env = {k: v for k, v in os.environ.items() if not k.startswith(('TMDB_', 'ADMIN_'))}
         env['RUST_LOG'] = 'kodiac=info'
-        command = [str(BINARY), '--media-path', str(media), '--db-path', str(db), '--metadata-path', str(root / 'metadata'), '--admin-password-file', str(password), '--scan-interval-seconds', '0', '--hw-accel', 'software', '--port', str(PORT)]
+        command = [str(BINARY), '--media-path', str(media), '--db-path', str(db), '--metadata-path', str(root / 'metadata'), '--admin-password-file', str(password), '--scan-interval-seconds', '0', '--hw-accel', 'software', '--bind', BIND, '--port', str(PORT)]
         with (root / 'server.log').open('w+') as log:
             process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
             def stop(*_):
@@ -119,7 +120,7 @@ def main():
                     def do_GET(self):
                         self.send_response(200); self.end_headers(); self.wfile.write(b'ready')
                     def log_message(self, *_): pass
-                readiness=http.server.ThreadingHTTPServer(('127.0.0.1',PORT+1),Ready)
+                readiness=http.server.ThreadingHTTPServer((BIND,PORT+1),Ready)
                 threading.Thread(target=readiness.serve_forever,daemon=True).start()
                 print(f'SPA fixture ready at http://127.0.0.1:{PORT} (5,200 films + 2 shows).', flush=True)
                 process.wait()

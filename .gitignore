@@ -1,7 +1,7 @@
 /target/
 /dist/
 /data/
-**/node_modules/
+**/node_modules
 /web/dist/
 /web/*.tsbuildinfo
 /web/test-results/
@@ -24,6 +24,8 @@
 __pycache__/
 *.pyc
 /validation/
+/.impeccable/review/
+/.impeccable/hook.cache.json
 AGENTS.md
 CLAUDE.md
 claude.md

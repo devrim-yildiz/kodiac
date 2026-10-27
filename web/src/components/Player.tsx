@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import * as Slider from "@radix-ui/react-slider";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import {
-  ArrowDownLeft,
   ArrowUpRight,
   Captions,
   Check,
   ChevronLeft,
+  ChevronRight,
   LoaderCircle,
   Maximize,
   Minimize2,
@@ -14,8 +14,6 @@ import {
   Pause,
   PictureInPicture2,
   Play,
-  RotateCcw,
-  RotateCw,
   Volume2,
   VolumeX,
   X,
@@ -124,6 +122,58 @@ export function Player() {
   const surface = useRef<HTMLElement>(null);
   const [scrubbing, setScrubbing] = useState<number | null>(null);
   const [pipAvailable, setPipAvailable] = useState(false);
+  const [controls, setControls] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPane, setMenuPane] = useState("root");
+  const [activity, setActivity] = useState(0);
+  const [keyboardFocus, setKeyboardFocus] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [buffered, setBuffered] = useState(0);
+  const reveal = () => {
+    setControls(true);
+    setActivity((n) => n + 1);
+  };
+  const chromeVisible =
+    controls ||
+    !playing ||
+    loading ||
+    !!error ||
+    menuOpen ||
+    scrubbing !== null ||
+    keyboardFocus;
+  useEffect(() => {
+    reveal();
+    setScrubbing(null);
+    setBuffered(0);
+  }, [item?.id, expanded]);
+  useEffect(() => {
+    if (
+      !expanded ||
+      !playing ||
+      loading ||
+      error ||
+      menuOpen ||
+      scrubbing !== null ||
+      keyboardFocus
+    )
+      return;
+    const timer = setTimeout(() => setControls(false), 2800);
+    return () => clearTimeout(timer);
+  }, [
+    activity,
+    expanded,
+    playing,
+    loading,
+    error,
+    menuOpen,
+    scrubbing,
+    keyboardFocus,
+  ]);
+  useEffect(() => {
+    const changed = () => setFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", changed);
+    return () => document.removeEventListener("fullscreenchange", changed);
+  }, []);
   useEffect(() => {
     const current = usePlayer.getState();
     if (!current.item || !current.source || !video.current) return;
@@ -199,6 +249,10 @@ export function Player() {
   useEffect(() => {
     if (!item) return;
     const keydown = (event: KeyboardEvent) => {
+      if (expanded) {
+        reveal();
+        if (event.key === "Tab") setKeyboardFocus(true);
+      }
       if (
         (event.target as HTMLElement).closest(
           'input,select,textarea,[role="slider"],[role="menu"],[role="dialog"]',
@@ -215,6 +269,11 @@ export function Player() {
       }
       if (!expanded) return;
       if (event.key === " " || event.key.toLowerCase() === "k") {
+        if (
+          event.key === " " &&
+          (event.target as HTMLElement).closest("button")
+        )
+          return;
         event.preventDefault();
         if (video.current?.paused) void video.current.play();
         else video.current?.pause();
@@ -268,12 +327,59 @@ export function Player() {
       ...(mode === "direct" ? { audioIndex: null } : {}),
     });
   };
+  const tracks = source?.MediaStreams || [];
+  const changeAudio = (value: string) => {
+    const index = Number(value);
+    if (index < 0) {
+      patch({ audioIndex: null, mode: "direct", error: "" });
+      return;
+    }
+    const audio = tracks.filter((s) => s.Type === "Audio")[index];
+    if (!audio || !item) return;
+    const mode = canBuffer("remux", item, audio.Codec) ? "remux" : "transcode";
+    if (!canBuffer(mode, item, audio.Codec)) {
+      patch({ error: "Audio switching is unavailable in this browser." });
+      return;
+    }
+    patch({ audioIndex: index, mode, error: "" });
+  };
+  const fullscreenToggle = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else if (surface.current?.requestFullscreen)
+        await surface.current.requestFullscreen();
+      else {
+        const v = video.current as
+          (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
+        if (v?.webkitEnterFullscreen) v.webkitEnterFullscreen();
+        else throw new Error();
+      }
+    } catch {
+      patch({ error: "Fullscreen is unavailable in this browser." });
+    }
+  };
+  const intro = experience?.chapters?.find((c) =>
+    /intro|opening/i.test(c.tags?.title || ""),
+  );
+  const showIntro =
+    intro &&
+    position >= Number(intro.start_time) &&
+    position < Number(intro.end_time);
   return (
     <section
       ref={surface}
-      className={`player ${item ? "is-active" : ""} ${expanded ? "is-expanded" : "is-docked"}`}
+      className={`player ${item ? "is-active" : ""} ${expanded ? "is-expanded" : "is-docked"} ${chromeVisible ? "controls-visible" : "controls-hidden"}`}
       aria-label={expanded ? "Cinema player" : "Mini player"}
       aria-hidden={!item}
+      onPointerMove={reveal}
+      onPointerDown={() => setKeyboardFocus(false)}
+      onKeyDown={(e) => {
+        reveal();
+        if (e.key === "Tab") setKeyboardFocus(true);
+      }}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) setKeyboardFocus(false);
+      }}
     >
       <div className="video-stage">
         <video
@@ -281,50 +387,58 @@ export function Player() {
           id="persistent-video"
           playsInline
           preload="metadata"
-          onClick={togglePlay}
           aria-label={item ? `Playing ${item.title}` : "Video player"}
-        />
-        {expanded &&
-          item?.kind === "episode" &&
-          position < 180 &&
-          duration - position > 30 &&
-          (() => {
-            const intro = experience?.chapters?.find((c) =>
-              /intro|opening/i.test(c.tags?.title || ""),
-            );
-            const start = Number(intro?.start_time || 0);
-            const end = Number(intro?.end_time || 0);
-            if (intro && (position < start || position >= end)) return null;
-            return (
-              <button
-                className="skip-intro glass-button"
-                onClick={() =>
-                  engine.current?.seek(
-                    intro ? end : Math.min(duration, position + 85),
-                  )
+          onClick={() => {
+            if (expanded && matchMedia("(pointer: coarse)").matches) {
+              setControls((v) => !v);
+              setActivity((n) => n + 1);
+            } else {
+              togglePlay();
+              reveal();
+            }
+          }}
+          onDoubleClick={() => {
+            if (expanded && !matchMedia("(pointer: coarse)").matches)
+              void fullscreenToggle();
+          }}
+          onProgress={() => {
+            const v = video.current;
+            if (v) {
+              for (let i = 0; i < v.buffered.length; i++)
+                if (
+                  v.currentTime >= v.buffered.start(i) &&
+                  v.currentTime <= v.buffered.end(i)
+                ) {
+                  setBuffered(v.buffered.end(i));
+                  break;
                 }
-              >
-                {intro ? "Skip intro" : "+85s Skip Intro"}
-              </button>
-            );
-          })()}
+            }
+          }}
+        />
+        {expanded && showIntro && (
+          <button
+            className="skip-intro glass-button"
+            onClick={() => engine.current?.seek(Number(intro.end_time))}
+          >
+            Skip intro
+          </button>
+        )}
         {expanded && nearingEnd && experience?.next_episode && !dismissed && (
           <div className="episode-prompt glass" role="status">
-            <span className="eyebrow">KEEP THE STORY GOING</span>
-            <h3>Next Episode in {countdown}s…</h3>
+            <h3>Next episode in {countdown}s</h3>
             <p>{experience.next_episode.title}</p>
             <button className="primary-button" onClick={() => setCountdown(0)}>
               Play next episode
             </button>
-            <button className="cancel-next" onClick={() => setDismissed(true)}>
-              Stay with this episode
+            <button className="text-button" onClick={() => setDismissed(true)}>
+              Keep watching
             </button>
           </div>
         )}
         {expanded && loading && (
           <div className="video-loading" role="status">
             <LoaderCircle className="spin" size={28} />
-            <span>Preparing your cinema…</span>
+            <span>Loading video…</span>
           </div>
         )}
       </div>
@@ -333,83 +447,57 @@ export function Player() {
           {expanded && (
             <header className="cinema-header">
               <button
-                className="glass-button"
+                className="icon-button"
                 onClick={() => void dock()}
                 aria-label="Browse while playing"
               >
-                <ChevronLeft size={18} /> Browse library
+                <ChevronLeft size={24} />
               </button>
-              <span className="cinema-wordmark">
-                KODIAC <span>CINEMA</span>
-              </span>
+              <div>
+                <strong>{item.title}</strong>
+                <span>{item.show_title || item.series_name || item.year}</span>
+              </div>
               <button
-                className="icon-button glass"
+                className="icon-button"
                 onClick={() => void dock()}
                 aria-label="Dock player"
               >
-                <Minimize2 size={20} />
+                <Minimize2 size={22} />
               </button>
             </header>
           )}
-          <div className="player-panel glass">
-            <div className="now-playing">
-              <span className="eyebrow">
-                {expanded ? "NOW PLAYING" : "CONTINUE EXPLORING"}
-              </span>
-              <strong>{item.title}</strong>
-              <span>
-                {item.series_name ||
-                  item.show_title ||
-                  item.year ||
-                  "Your private cinema"}
-              </span>
-            </div>
-            <div className="transport">
-              <button
-                className="icon-button skip"
-                onClick={() => engine.current?.seek(position - 10)}
-                aria-label="Back 10 seconds"
-              >
-                <RotateCcw size={19} />
-                <span>10</span>
-              </button>
-              <button
-                className="play-toggle"
-                onClick={togglePlay}
-                aria-label={playing ? "Pause" : "Play"}
-              >
-                {playing ? (
-                  <Pause size={21} fill="currentColor" />
-                ) : (
-                  <Play size={21} fill="currentColor" />
-                )}
-              </button>
-              <button
-                className="icon-button skip"
-                onClick={() => engine.current?.seek(position + 10)}
-                aria-label="Forward 10 seconds"
-              >
-                <RotateCw size={19} />
-                <span>10</span>
-              </button>
-            </div>
+          <div className="player-panel">
+            {!expanded && (
+              <div className="now-playing">
+                <strong>{item.title}</strong>
+                <span>{item.show_title || item.year}</span>
+              </div>
+            )}
             <div className="scrubber">
-              <span>{formatTime(scrubbing ?? position)}</span>
               <Slider.Root
                 className="slider"
-                aria-label="Playback position"
                 min={0}
                 max={Math.max(duration, 1)}
                 step={0.1}
                 value={[scrubbing ?? position]}
-                onValueChange={([value]) => setScrubbing(value)}
+                onValueChange={([value]) => {
+                  setScrubbing(value);
+                  reveal();
+                }}
                 onValueCommit={([value]) => {
                   engine.current?.seek(value);
                   setScrubbing(null);
+                  reveal();
                 }}
                 disabled={!duration}
               >
                 <Slider.Track className="slider-track">
+                  <span
+                    className="slider-buffered"
+                    style={{
+                      width: `${duration ? Math.min(100, (buffered / duration) * 100) : 0}%`,
+                    }}
+                  />
                   <Slider.Range className="slider-range" />
                 </Slider.Track>
                 <Slider.Thumb
@@ -418,7 +506,48 @@ export function Player() {
                   aria-valuetext={`${formatTime(scrubbing ?? position)} of ${formatTime(duration)}`}
                 />
               </Slider.Root>
-              <span>{formatTime(duration)}</span>
+              <div className="timeline-times">
+                <span>{formatTime(scrubbing ?? position)}</span>
+                <span>
+                  −{formatTime(Math.max(0, duration - (scrubbing ?? position)))}
+                </span>
+              </div>
+            </div>
+            <div className="transport">
+              <button
+                className="icon-button skip"
+                onClick={() => {
+                  engine.current?.seek(position - 10);
+                  reveal();
+                }}
+                aria-label="Back 10 seconds"
+              >
+                <Skip direction="back" />
+              </button>
+              <button
+                className="play-toggle"
+                onClick={() => {
+                  togglePlay();
+                  reveal();
+                }}
+                aria-label={playing ? "Pause" : "Play"}
+              >
+                {playing ? (
+                  <Pause size={28} fill="currentColor" />
+                ) : (
+                  <Play size={28} fill="currentColor" />
+                )}
+              </button>
+              <button
+                className="icon-button skip"
+                onClick={() => {
+                  engine.current?.seek(position + 10);
+                  reveal();
+                }}
+                aria-label="Forward 10 seconds"
+              >
+                <Skip direction="forward" />
+              </button>
             </div>
             <div className="volume-control">
               <button
@@ -427,14 +556,13 @@ export function Player() {
                 aria-label={muted ? "Unmute" : "Mute"}
               >
                 {muted || volume === 0 ? (
-                  <VolumeX size={19} />
+                  <VolumeX size={21} />
                 ) : (
-                  <Volume2 size={19} />
+                  <Volume2 size={21} />
                 )}
               </button>
               <Slider.Root
                 className="slider volume-slider"
-                aria-label="Volume"
                 min={0}
                 max={1}
                 step={0.01}
@@ -453,188 +581,225 @@ export function Player() {
                 />
               </Slider.Root>
             </div>
-            <Menu.Root>
-              <Menu.Trigger asChild>
-                <button className="icon-button" aria-label="Playback settings">
-                  <MoreHorizontal size={23} />
-                </button>
-              </Menu.Trigger>
-              <Menu.Portal>
-                <Menu.Content
-                  className="menu glass playback-menu"
-                  side="top"
-                  sideOffset={15}
-                  align="end"
-                >
-                  <Menu.Label className="menu-label">PLAYBACK</Menu.Label>
-                  <Menu.RadioGroup
-                    value={state.mode}
-                    onValueChange={(value) => settings(value as StreamMode)}
-                  >
-                    {(["direct", "remux", "transcode"] as const).map((mode) => (
-                      <Menu.RadioItem
-                        className="menu-item"
-                        key={mode}
-                        value={mode}
-                        disabled={
-                          mode !== "direct" &&
-                          !canBuffer(
-                            mode,
-                            item,
-                            source?.MediaStreams.filter(
-                              (s) => s.Type === "Audio",
-                            )[state.audioIndex ?? 0]?.Codec,
-                          )
-                        }
-                      >
-                        {mode === "direct"
-                          ? "Direct play"
-                          : mode === "remux"
-                            ? "Remux · Original quality"
-                            : "Transcode · H.264"}
-                        <Menu.ItemIndicator>
-                          <Check size={15} />
-                        </Menu.ItemIndicator>
-                      </Menu.RadioItem>
-                    ))}
-                  </Menu.RadioGroup>
-                  <Menu.Separator className="menu-separator" />
-                  <Menu.Label className="menu-label">AUDIO</Menu.Label>
-                  <Menu.RadioGroup
-                    value={String(state.audioIndex ?? -1)}
-                    onValueChange={(value) => {
-                      const index = Number(value);
-                      if (index < 0) {
-                        patch({ audioIndex: null, mode: "direct", error: "" });
-                        return;
-                      }
-                      const audio = source?.MediaStreams.filter(
-                        (s) => s.Type === "Audio",
-                      )[index];
-                      if (!audio) return;
-                      const mode = canBuffer("remux", item, audio.Codec)
-                        ? "remux"
-                        : "transcode";
-                      if (!canBuffer(mode, item, audio.Codec)) {
-                        patch({
-                          error:
-                            "Audio switching requires MediaSource support in this browser.",
-                        });
-                        return;
-                      }
-                      patch({ audioIndex: index, mode, error: "" });
-                    }}
-                  >
-                    <Menu.RadioItem className="menu-item" value="-1">
-                      Default audio
-                      <Menu.ItemIndicator>
-                        <Check size={15} />
-                      </Menu.ItemIndicator>
-                    </Menu.RadioItem>
-                    {source?.MediaStreams.filter((s) => s.Type === "Audio").map(
-                      (track, index) => (
-                        <Menu.RadioItem
-                          className="menu-item"
-                          key={track.Index}
-                          value={String(index)}
-                        >
-                          {language(track.Language)} ·{" "}
-                          {track.Codec?.toUpperCase()}{" "}
-                          {track.Channels ? `· ${track.Channels} ch` : ""}
-                          <Menu.ItemIndicator>
-                            <Check size={15} />
-                          </Menu.ItemIndicator>
-                        </Menu.RadioItem>
-                      ),
-                    )}
-                  </Menu.RadioGroup>
-                  <Menu.Separator className="menu-separator" />
-                  <Menu.Label className="menu-label">
-                    <Captions size={14} /> SUBTITLES
-                  </Menu.Label>
-                  <Menu.RadioGroup
-                    value={String(state.subtitleIndex ?? -1)}
-                    onValueChange={(value) =>
-                      patch({
-                        subtitleIndex:
-                          Number(value) === -1 ? null : Number(value),
-                      })
-                    }
-                  >
-                    <Menu.RadioItem className="menu-item" value="-1">
-                      Off
-                      <Menu.ItemIndicator>
-                        <Check size={15} />
-                      </Menu.ItemIndicator>
-                    </Menu.RadioItem>
-                    {source?.MediaStreams.filter(
-                      (s) => s.Type === "Subtitle" && s.IsTextSubtitleStream,
-                    ).map((track) => (
-                      <Menu.RadioItem
-                        className="menu-item"
-                        key={track.Index}
-                        value={String(track.Index)}
-                      >
-                        {language(track.Language)}
-                        {track.IsForced ? " · Forced" : ""}
-                        <Menu.ItemIndicator>
-                          <Check size={15} />
-                        </Menu.ItemIndicator>
-                      </Menu.RadioItem>
-                    ))}
-                  </Menu.RadioGroup>
-                </Menu.Content>
-              </Menu.Portal>
-            </Menu.Root>
-            {expanded && pipAvailable && (
-              <button
-                className="icon-button pip-button"
-                aria-label="Picture in picture"
-                onClick={() => {
-                  const v = video.current;
-                  if (v)
-                    void (
-                      document.pictureInPictureElement
-                        ? document.exitPictureInPicture()
-                        : v.requestPictureInPicture()
-                    ).catch(() =>
-                      patch({
-                        error:
-                          "Picture in picture is unavailable for this video.",
-                      }),
-                    );
+            <div className="player-actions">
+              <Menu.Root
+                open={menuOpen}
+                onOpenChange={(v) => {
+                  setMenuOpen(v);
+                  setMenuPane("root");
+                  reveal();
                 }}
               >
-                <PictureInPicture2 size={20} />
+                <Menu.Trigger asChild>
+                  <button
+                    className="icon-button"
+                    aria-label="Playback settings"
+                  >
+                    <MoreHorizontal size={25} />
+                  </button>
+                </Menu.Trigger>
+                <Menu.Portal container={expanded ? surface.current : undefined}>
+                  <Menu.Content
+                    className="menu playback-menu"
+                    side="top"
+                    sideOffset={12}
+                    align="end"
+                  >
+                    {menuPane === "root" ? (
+                      <>
+                        <Menu.Item
+                          className="menu-item"
+                          onSelect={(e) => {
+                            e.preventDefault();
+                            setMenuPane("tracks");
+                          }}
+                        >
+                          <Captions size={18} /> Audio & subtitles
+                          <ChevronRight size={16} />
+                        </Menu.Item>
+                        <Menu.Item
+                          className="menu-item"
+                          onSelect={(e) => {
+                            e.preventDefault();
+                            setMenuPane("mode");
+                          }}
+                        >
+                          Playback mode
+                          <ChevronRight size={16} />
+                        </Menu.Item>
+                      </>
+                    ) : (
+                      <>
+                        <Menu.Item
+                          className="menu-item"
+                          onSelect={(e) => {
+                            e.preventDefault();
+                            setMenuPane("root");
+                          }}
+                        >
+                          <ChevronLeft size={17} /> Back
+                        </Menu.Item>
+                        <Menu.Separator className="menu-separator" />
+                        {menuPane === "tracks" ? (
+                          <>
+                            {" "}
+                            <Menu.Label className="menu-label">
+                              Audio
+                            </Menu.Label>
+                            <Menu.RadioGroup
+                              value={String(state.audioIndex ?? -1)}
+                              onValueChange={changeAudio}
+                            >
+                              <Menu.RadioItem className="menu-item" value="-1">
+                                Default audio
+                                <Menu.ItemIndicator>
+                                  <Check size={16} />
+                                </Menu.ItemIndicator>
+                              </Menu.RadioItem>
+                              {tracks
+                                .filter((s) => s.Type === "Audio")
+                                .map((t, index) => (
+                                  <Menu.RadioItem
+                                    key={t.Index}
+                                    value={String(index)}
+                                    className="menu-item"
+                                  >
+                                    {language(t.Language)}
+                                    {t.Channels ? ` · ${t.Channels} ch` : ""}
+                                    <Menu.ItemIndicator>
+                                      <Check size={16} />
+                                    </Menu.ItemIndicator>
+                                  </Menu.RadioItem>
+                                ))}
+                            </Menu.RadioGroup>
+                            <Menu.Separator className="menu-separator" />
+                            <Menu.Label className="menu-label">
+                              Subtitles
+                            </Menu.Label>
+                            <Menu.RadioGroup
+                              value={String(state.subtitleIndex ?? -1)}
+                              onValueChange={(v) =>
+                                patch({
+                                  subtitleIndex:
+                                    Number(v) === -1 ? null : Number(v),
+                                })
+                              }
+                            >
+                              <Menu.RadioItem className="menu-item" value="-1">
+                                Off
+                                <Menu.ItemIndicator>
+                                  <Check size={16} />
+                                </Menu.ItemIndicator>
+                              </Menu.RadioItem>
+                              {tracks
+                                .filter((s) => s.Type === "Subtitle")
+                                .map((t) => (
+                                  <Menu.RadioItem
+                                    key={t.Index}
+                                    className="menu-item"
+                                    value={String(t.Index)}
+                                    disabled={!t.IsTextSubtitleStream}
+                                  >
+                                    {language(t.Language)}
+                                    {t.IsForced ? " · Forced" : ""}
+                                    {!t.IsTextSubtitleStream
+                                      ? " · Native app only"
+                                      : ""}
+                                    <Menu.ItemIndicator>
+                                      <Check size={16} />
+                                    </Menu.ItemIndicator>
+                                  </Menu.RadioItem>
+                                ))}
+                            </Menu.RadioGroup>
+                          </>
+                        ) : (
+                          <>
+                            {" "}
+                            <Menu.RadioGroup
+                              value={state.mode}
+                              onValueChange={(v) => settings(v as StreamMode)}
+                            >
+                              {(["direct", "remux", "transcode"] as const).map(
+                                (mode) => (
+                                  <Menu.RadioItem
+                                    key={mode}
+                                    className="menu-item"
+                                    value={mode}
+                                    disabled={
+                                      mode !== "direct" &&
+                                      !canBuffer(
+                                        mode,
+                                        item,
+                                        tracks.filter(
+                                          (s) => s.Type === "Audio",
+                                        )[state.audioIndex ?? 0]?.Codec,
+                                      )
+                                    }
+                                  >
+                                    {mode === "direct"
+                                      ? "Direct play"
+                                      : mode === "remux"
+                                        ? "Remux · original quality"
+                                        : "Transcode · H.264"}
+                                    <Menu.ItemIndicator>
+                                      <Check size={16} />
+                                    </Menu.ItemIndicator>
+                                  </Menu.RadioItem>
+                                ),
+                              )}
+                            </Menu.RadioGroup>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </Menu.Content>
+                </Menu.Portal>
+              </Menu.Root>
+              {expanded && pipAvailable && (
+                <button
+                  className="icon-button pip-button"
+                  aria-label="Picture in picture"
+                  onClick={() => {
+                    const v = video.current;
+                    if (v)
+                      void (
+                        document.pictureInPictureElement
+                          ? document.exitPictureInPicture()
+                          : v.requestPictureInPicture()
+                      ).catch(() =>
+                        patch({
+                          error:
+                            "Picture in picture is unavailable for this video.",
+                        }),
+                      );
+                  }}
+                >
+                  <PictureInPicture2 size={22} />
+                </button>
+              )}
+              <button
+                className="icon-button expand-button"
+                aria-label={
+                  expanded
+                    ? fullscreen
+                      ? "Exit fullscreen"
+                      : "Enter fullscreen"
+                    : "Expand player"
+                }
+                onClick={() =>
+                  expanded ? void fullscreenToggle() : patch({ expanded: true })
+                }
+              >
+                {expanded ? <Maximize size={22} /> : <ArrowUpRight size={22} />}
               </button>
-            )}
-            <button
-              className="icon-button expand-button"
-              aria-label={expanded ? "Enter fullscreen" : "Expand player"}
-              onClick={() =>
-                expanded
-                  ? void surface.current
-                      ?.requestFullscreen()
-                      .catch(() =>
-                        patch({ error: "Fullscreen is unavailable." }),
-                      )
-                  : patch({ expanded: true })
-              }
-            >
-              {expanded ? <Maximize size={19} /> : <ArrowUpRight size={21} />}
-            </button>
-            <button
-              className="icon-button close-player"
-              aria-label="Close player"
-              onClick={() => void close()}
-            >
-              <X size={19} />
-            </button>
-            {expanded && (
-              <button className="dock-label" onClick={() => void dock()}>
-                <ArrowDownLeft size={14} /> Keep watching while you browse
+              <button
+                className="icon-button close-player"
+                aria-label="Close player"
+                onClick={() => void close()}
+              >
+                <X size={22} />
               </button>
-            )}
+            </div>
           </div>
           {error && (
             <div className="player-error" role="alert">
@@ -643,12 +808,37 @@ export function Player() {
                 aria-label="Dismiss playback message"
                 onClick={() => patch({ error: "" })}
               >
-                <X size={15} />
+                <X size={17} />
               </button>
             </div>
           )}
         </>
       )}
     </section>
+  );
+}
+function Skip({ direction }: { direction: "back" | "forward" }) {
+  return (
+    <span className="skip-icon">
+      <svg
+        viewBox="0 0 36 36"
+        width="36"
+        height="36"
+        aria-hidden="true"
+        style={{
+          transform: direction === "forward" ? "scaleX(-1)" : undefined,
+        }}
+      >
+        <path
+          d="M7 10a13 13 0 1 1-2 11M7 4v7h7"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <span>10</span>
+    </span>
   );
 }

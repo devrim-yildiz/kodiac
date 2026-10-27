@@ -14,7 +14,8 @@ export default defineConfig({
   },
   reporter: [["list"], ["json", { outputFile: "test-results/results.json" }]],
   webServer: {
-    command: "python3 ../scripts/spa-test-server.py",
+    command:
+      process.env.SPA_TEST_COMMAND || "python3 ../scripts/spa-test-server.py",
     url: "http://127.0.0.1:18198",
     timeout: 120_000,
     reuseExistingServer: false,

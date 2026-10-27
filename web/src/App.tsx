@@ -15,24 +15,21 @@ import {
   ArrowRight,
   Check,
   ChevronDown,
-  Film,
   LoaderCircle,
   LogOut,
   Plus,
-  RefreshCw,
   Search,
-  Sparkles,
   Settings2,
   X,
 } from "lucide-react";
 import { allPages, api, aborted, message } from "./api";
 import { cancelOpening, playTitle, usePlayer, useSession } from "./store";
 import { flushProgress } from "./player/engine";
-import type { Profile, Title, User } from "./types";
+import type { Preferences, Profile, Title, User } from "./types";
 import { idPath } from "./types";
 import { Player } from "./components/Player";
-import { ContinueWatching, Hero, VirtualLibrary } from "./components/Library";
-import { Empty, Loading, SectionHeading } from "./components/shared";
+import { ContinueWatching, VirtualLibrary } from "./components/Library";
+import { Empty, Loading } from "./components/shared";
 
 import { captureOrigin } from "./components/useSpatialPresence";
 import { Settings } from "./components/Settings";
@@ -78,13 +75,8 @@ function Login() {
         kodiac
       </div>
       <div className="login-card">
-        <span className="eyebrow">YOUR PRIVATE CINEMA</span>
-        <h1>
-          A world of stories.
-          <br />
-          <span>All yours.</span>
-        </h1>
-        <p>Settle in. Your next great watch is waiting.</p>
+        <h1>Sign in to Kodiac</h1>
+        <p>Use your server account to open your library.</p>
         <form
           onSubmit={async (event) => {
             event.preventDefault();
@@ -142,13 +134,7 @@ function Login() {
             )}
           </button>
         </form>
-        <span className="login-footnote">
-          Your library. Your profiles. Your place.
-        </span>
       </div>
-      <footer>
-        MADE FOR YOUR BIG SCREEN <span>LOCAL FIRST · ALWAYS YOURS</span>
-      </footer>
     </main>
   );
 }
@@ -197,9 +183,11 @@ function Cinema() {
   const session = useSession();
   const active = usePlayer((state) => Boolean(state.item));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [hub, setHub] = useState<Hub | null>(null);
+  const [homeError, setHomeError] = useState("");
   useEffect(() => {
     const scroll = () => setScrolled(window.scrollY > 50);
     window.addEventListener("scroll", scroll, { passive: true });
@@ -207,6 +195,16 @@ function Cinema() {
   }, []);
   const [kind, setKind] = useState("all");
   const [query, setQuery] = useState("");
+  const [genre, setGenre] = useState("");
+  const [sort, setSort] = useState("title");
+  const [preferences, setPreferences] = useState<Preferences | null>(null);
+  const [collectionView, setCollectionView] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
+  const [collectionItems, setCollectionItems] = useState<Title[]>([]);
+  const [collectionLoading, setCollectionLoading] = useState(false);
+  const [collectionError, setCollectionError] = useState("");
   const [movies, setMovies] = useState<Title[]>([]);
   const [shows, setShows] = useState<Title[]>([]);
   const [counts, setCounts] = useState({ movie: 0, show: 0 });
@@ -238,6 +236,10 @@ function Cinema() {
     setMovie(null);
     setShow(null);
     setQuery("");
+    setPreferences(null);
+    setCollectionView(null);
+    setSettingsOpen(false);
+    setHub(null);
     setNotice("");
   };
   useEffect(() => {
@@ -342,14 +344,85 @@ function Cinema() {
         ),
     [movies, shows, kind],
   );
+  useEffect(() => {
+    if (!session.user) return;
+    const a = new AbortController();
+    setPreferences(null);
+    setHomeError("");
+    api<Preferences>("/api/v1/preferences", { signal: a.signal })
+      .then(setPreferences)
+      .catch((e) => {
+        if (!a.signal.aborted) setHomeError(message(e));
+      });
+    try {
+      const saved = localStorage.getItem(`kodiac-sort:${session.user.id}`);
+      setSort(
+        ["title", "title-desc", "year", "rating"].includes(saved || "")
+          ? saved!
+          : "title",
+      );
+    } catch {
+      setSort("title");
+    }
+    return () => a.abort();
+  }, [session.user?.id, revision]);
+  useEffect(() => {
+    if (!collectionView) return;
+    const a = new AbortController();
+    setCollectionItems([]);
+    setCollectionLoading(true);
+    setCollectionError("");
+    allPages<Title>(
+      `/api/v1/collections/${idPath(collectionView.id)}`,
+      a.signal,
+    )
+      .then((items) => {
+        setCollectionItems(items);
+        setCollectionLoading(false);
+      })
+      .catch((e) => {
+        if (!a.signal.aborted) {
+          setCollectionError(message(e));
+          setCollectionLoading(false);
+        }
+      });
+    return () => a.abort();
+  }, [collectionView?.id, revision]);
+  const libraryItems = collectionView ? collectionItems : collection;
+  const genres = useMemo(
+    () =>
+      [
+        ...new Map(
+          libraryItems
+            .flatMap((t) => t.genres || [])
+            .map((g) => [String(g.id), g]),
+        ).values(),
+      ].sort((a, b) => a.name.localeCompare(b.name)),
+    [libraryItems],
+  );
   const filtered = useMemo(
     () =>
-      collection.filter((item) =>
-        item.title
-          .toLocaleLowerCase()
-          .includes(query.trim().toLocaleLowerCase()),
-      ),
-    [collection, query],
+      libraryItems
+        .filter(
+          (item) =>
+            item.title
+              .toLocaleLowerCase()
+              .includes(query.trim().toLocaleLowerCase()) &&
+            (!genre || item.genres?.some((g) => String(g.id) === genre)),
+        )
+        .sort((a, b) => {
+          const title =
+            a.title.localeCompare(b.title, undefined, { numeric: true }) ||
+            a.id.localeCompare(b.id);
+          return sort === "title-desc"
+            ? -title
+            : sort === "year"
+              ? (b.year ?? -1) - (a.year ?? -1) || title
+              : sort === "rating"
+                ? (b.rating ?? -1) - (a.rating ?? -1) || title
+                : title;
+        }),
+    [libraryItems, query, genre, sort],
   );
   useEffect(() => {
     if (!session.user || !session.profileId) return;
@@ -359,7 +432,7 @@ function Cinema() {
     })
       .then(setHub)
       .catch((e) => {
-        if (!a.signal.aborted) setNotice(message(e));
+        if (!a.signal.aborted) setHomeError(message(e));
       });
     return () => a.abort();
   }, [session.user?.id, session.profileId, revision, historyRevision]);
@@ -367,24 +440,33 @@ function Cinema() {
     () => new Map(continued.map((item) => [item.id, item.position_ticks])),
     [continued],
   );
-  const heroItems = useMemo(
-    () =>
-      collection.map((item) =>
-        resumeById.has(item.id)
-          ? { ...item, position_ticks: resumeById.get(item.id) }
-          : item,
-      ),
-    [collection, resumeById],
-  );
   const currentProfile = session.profiles.find(
     (profile) => profile.id === session.profileId,
   );
   const browse = () => {
+    if (
+      settingsOpen &&
+      settingsDirty &&
+      !window.confirm("Discard unsaved changes?")
+    )
+      return false;
     usePlayer.getState().patch({ expanded: false });
     setShow(null);
     setMovie(null);
+    setSettingsOpen(false);
+    setCollectionView(null);
+    setCollectionError("");
+    setQuery("");
+    setGenre("");
+    window.scrollTo({ top: 0 });
+    return true;
+  };
+  const openCollection = (c: { id: string; title: string }) => {
+    if (!browse()) return;
+    setCollectionView(c);
   };
   const onOpen = (item: Title) => {
+    if (settingsOpen && !browse()) return;
     if (item.kind === "episode") {
       const parent = shows.find((s) => s.id === item.show_id);
       if (parent) {
@@ -444,7 +526,7 @@ function Cinema() {
   if (!session.ready)
     return (
       <div className="boot-screen">
-        <Loading label="Opening your cinema…" />
+        <Loading label="Loading Kodiac…" />
       </div>
     );
   return (
@@ -459,7 +541,9 @@ function Cinema() {
             >
               <button
                 className="brand"
-                onClick={browse}
+                onClick={() => {
+                  if (browse()) setKind("all");
+                }}
                 aria-label="Kodiac home"
               >
                 <span className="brand-icon">
@@ -468,10 +552,9 @@ function Cinema() {
                 <span>kodiac</span>
               </button>
               <Tabs.Root
-                value={kind}
+                value={settingsOpen ? "" : kind}
                 onValueChange={(value) => {
-                  setKind(value);
-                  browse();
+                  if (browse()) setKind(value);
                 }}
               >
                 <Tabs.List className="segments" aria-label="Library view">
@@ -494,36 +577,11 @@ function Cinema() {
                   aria-label="Open settings"
                   onClick={(event) => {
                     captureOrigin(event.currentTarget);
-                    setSettingsOpen(true);
+                    if (browse()) setSettingsOpen(true);
                   }}
                 >
                   <Settings2 size={19} />
                 </button>
-                <label className="search-box">
-                  <Search size={17} />
-                  <input
-                    ref={search}
-                    aria-label="Search your library"
-                    placeholder="Search your library"
-                    value={query}
-                    onChange={(event) => {
-                      setQuery(event.target.value);
-                      setShow(null);
-                    }}
-                  />
-                  <kbd>⌘ K</kbd>
-                  {query && (
-                    <button
-                      aria-label="Clear search"
-                      onClick={() => {
-                        setQuery("");
-                        search.current?.focus();
-                      }}
-                    >
-                      <X size={15} />
-                    </button>
-                  )}
-                </label>
                 <Menu.Root>
                   <Menu.Trigger asChild>
                     <button
@@ -542,9 +600,7 @@ function Cinema() {
                       sideOffset={15}
                       align="end"
                     >
-                      <Menu.Label className="menu-label">
-                        WHO’S WATCHING?
-                      </Menu.Label>
+                      <Menu.Label className="menu-label">Profiles</Menu.Label>
                       <Menu.RadioGroup
                         value={session.profileId}
                         onValueChange={(id) => void switchProfile(id)}
@@ -601,7 +657,13 @@ function Cinema() {
               </div>
             </header>
             <Suspense fallback={<Loading />}>
-              {show ? (
+              {settingsOpen ? (
+                <Settings
+                  onClose={() => setSettingsOpen(false)}
+                  onPreferences={setPreferences}
+                  onDirtyChange={setSettingsDirty}
+                />
+              ) : show ? (
                 <ShowPage
                   key={show.id}
                   show={show}
@@ -612,119 +674,219 @@ function Cinema() {
                   onPlay={(item) => void onPlay(item)}
                 />
               ) : (
-                <main>
-                  {!query && (
-                    <Hero
-                      items={
-                        kind === "all" && hub
-                          ? [
-                              ...hub.recently_added.filter(
-                                (t) => t.kind !== "episode",
-                              ),
-                              ...hub.trending_shows,
-                            ]
-                          : heroItems
-                      }
-                      onOpen={onOpen}
-                      onPlay={(item) => void onPlay(item)}
-                    />
-                  )}
-                  {historyError && (
-                    <div className="content-width inline-error" role="alert">
-                      Continue Watching could not load: {historyError}
-                      <button onClick={() => setHistoryRevision((n) => n + 1)}>
-                        Try again
-                      </button>
-                    </div>
-                  )}
-                  {!query && (
-                    <ContinueWatching
-                      items={continued.filter(
-                        (item) =>
-                          kind === "all" ||
-                          (kind === "anime"
-                            ? item.is_anime
-                            : kind === "show"
-                              ? item.kind === "episode"
-                              : item.kind === "movie"),
+                <main className="browse-page">
+                  {kind === "all" && !collectionView ? (
+                    <>
+                      <div className="page-heading content-width">
+                        <div>
+                          <h1>Home</h1>
+                          <p>
+                            {currentProfile?.name
+                              ? `${currentProfile.name}’s library`
+                              : "Your library"}
+                          </p>
+                        </div>
+                      </div>
+                      {historyError && (
+                        <div
+                          className="content-width inline-error"
+                          role="alert"
+                        >
+                          Continue watching could not load: {historyError}
+                          <button
+                            onClick={() => setHistoryRevision((n) => n + 1)}
+                          >
+                            Try again
+                          </button>
+                        </div>
                       )}
-                      onPlay={(item) => void onPlay(item)}
-                    />
-                  )}
-                  {kind === "all" && !query && (
-                    <Curated hub={hub} onOpen={onOpen} />
-                  )}
-                  <section
-                    id="library"
-                    className={`library-section content-width ${query ? "search-results" : ""}`}
-                    aria-busy={loading}
-                  >
-                    <SectionHeading
-                      eyebrow={
-                        query ? "FIND YOUR NEXT WATCH" : "CURATED BY YOU"
-                      }
-                      title={
-                        query
-                          ? `Results for “${query}”`
-                          : kind === "movie"
-                            ? "Your movies"
-                            : kind === "show"
-                              ? "Your series"
-                              : kind === "anime"
-                                ? "Your anime"
-                                : "Your collection"
-                      }
-                      count={(query
-                        ? filtered.length
-                        : kind === "movie"
-                          ? counts.movie
-                          : kind === "show"
-                            ? counts.show
-                            : kind === "anime"
-                              ? collection.length
-                              : counts.movie + counts.show
-                      ).toLocaleString()}
+                      {homeError ? (
+                        <Empty title="Home could not load">
+                          {homeError}
+                          <button
+                            className="secondary-button"
+                            onClick={() => setRevision((n) => n + 1)}
+                          >
+                            Try again
+                          </button>
+                        </Empty>
+                      ) : !hub || !preferences ? (
+                        <Loading />
+                      ) : preferences.home_sections.length === 0 ? (
+                        <div className="content-width">
+                          <Empty title="Make Home yours">
+                            Choose which library rows appear here.
+                            <button
+                              className="secondary-button"
+                              onClick={() => setSettingsOpen(true)}
+                            >
+                              Open settings
+                            </button>
+                          </Empty>
+                        </div>
+                      ) : (
+                        preferences.home_sections.map((section) =>
+                          section === "continue" ? (
+                            <ContinueWatching
+                              key={section}
+                              items={continued}
+                              onPlay={(item) => void onPlay(item)}
+                            />
+                          ) : (
+                            <Curated
+                              key={section}
+                              hub={hub}
+                              section={section}
+                              onOpen={onOpen}
+                              onCollection={openCollection}
+                            />
+                          ),
+                        )
+                      )}
+                      {!loading && movies.length + shows.length === 0 && (
+                        <Empty title="No media yet">
+                          An administrator can add media folders and scan the
+                          library in Settings.
+                        </Empty>
+                      )}
+                      {error && (
+                        <div
+                          className="content-width inline-error"
+                          role="alert"
+                        >
+                          {error}
+                          <button onClick={() => setRevision((n) => n + 1)}>
+                            Try again
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <section
+                      id="library"
+                      className="library-section content-width"
+                      aria-busy={collectionView ? collectionLoading : loading}
                     >
-                      <span className="library-sort">
-                        A — Z <ChevronDown size={12} />
-                      </span>
-                    </SectionHeading>
-                    {error && (
-                      <div className="inline-error" role="alert">
-                        {error}
-                        <button onClick={() => setRevision((n) => n + 1)}>
-                          Try again
+                      {collectionView && (
+                        <button
+                          className="back-link"
+                          onClick={() => {
+                            setCollectionView(null);
+                            setQuery("");
+                            setGenre("");
+                          }}
+                        >
+                          Back to library
                         </button>
+                      )}
+                      <div className="page-heading">
+                        <div>
+                          <h1>
+                            {collectionView?.title ||
+                              (kind === "movie"
+                                ? "Movies"
+                                : kind === "anime"
+                                  ? "Anime"
+                                  : "Series")}
+                          </h1>
+                          <p>
+                            {(collectionView
+                              ? collectionItems.length
+                              : kind === "movie"
+                                ? counts.movie
+                                : kind === "anime"
+                                  ? collection.length
+                                  : counts.show
+                            ).toLocaleString()}{" "}
+                            titles
+                          </p>
+                        </div>
                       </div>
-                    )}
-                    {kind === "all" && !query ? (
-                      <p className="library-invitation">
-                        Explore every story in Movies, Series or Anime.
-                      </p>
-                    ) : loading && !collection.length ? (
-                      <Loading />
-                    ) : !loading && !collection.length && !query ? (
-                      <Empty
-                        title={
-                          kind === "anime"
-                            ? "Your anime collection starts here"
-                            : "Your collection starts here"
-                        }
-                      >
-                        {kind === "anime"
-                          ? "Add anime movies and series to your Anime folder, then scan your library."
-                          : "Index your media to bring your movies and series together."}
-                      </Empty>
-                    ) : (
-                      <VirtualLibrary items={filtered} onOpen={onOpen} />
-                    )}
-                    {loading && collection.length > 0 && (
-                      <div className="catalog-loading" role="status">
-                        <LoaderCircle size={14} className="spin" /> Bringing in
-                        the rest of your collection…
+                      <div className="library-toolbar">
+                        <label className="search-box">
+                          <Search size={18} />
+                          <input
+                            ref={search}
+                            aria-label="Search your library"
+                            placeholder="Search titles"
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                          />
+                          {query && (
+                            <button
+                              aria-label="Clear search"
+                              onClick={() => {
+                                setQuery("");
+                                search.current?.focus();
+                              }}
+                            >
+                              <X size={16} />
+                            </button>
+                          )}
+                        </label>
+                        <label>
+                          <span className="sr-only">Genre</span>
+                          <select
+                            aria-label="Genre"
+                            value={genre}
+                            onChange={(e) => setGenre(e.target.value)}
+                          >
+                            <option value="">All genres</option>
+                            {genres.map((g) => (
+                              <option key={g.id} value={String(g.id)}>
+                                {g.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          <span className="sr-only">Sort by</span>
+                          <select
+                            aria-label="Sort by"
+                            value={sort}
+                            onChange={(e) => {
+                              setSort(e.target.value);
+                              try {
+                                localStorage.setItem(
+                                  `kodiac-sort:${session.user?.id}`,
+                                  e.target.value,
+                                );
+                              } catch {
+                                /* Storage may be disabled. */
+                              }
+                            }}
+                          >
+                            <option value="title">Title: A–Z</option>
+                            <option value="title-desc">Title: Z–A</option>
+                            <option value="year">Year: newest first</option>
+                            <option value="rating">
+                              Rating: highest first
+                            </option>
+                          </select>
+                        </label>
                       </div>
-                    )}
-                  </section>
+                      {(error || collectionError) && (
+                        <div className="inline-error" role="alert">
+                          {collectionError || error}
+                          <button onClick={() => setRevision((n) => n + 1)}>
+                            Try again
+                          </button>
+                        </div>
+                      )}
+                      {(collectionView ? collectionLoading : loading) &&
+                      !libraryItems.length ? (
+                        <Loading />
+                      ) : (
+                        <VirtualLibrary items={filtered} onOpen={onOpen} />
+                      )}
+                      {loading && libraryItems.length > 0 && (
+                        <div className="catalog-loading" role="status">
+                          <LoaderCircle size={14} className="spin" /> Loading
+                          remaining titles…
+                        </div>
+                      )}
+                    </section>
+                  )}
                 </main>
               )}
               {lastMovie.current && (
@@ -734,41 +896,22 @@ function Cinema() {
                   movie={lastMovie.current}
                   onClose={() => setMovie(null)}
                   onPlay={(item) => void onPlay(item)}
+                  collections={hub?.collections || []}
+                  onCollectionChanged={() => setRevision((n) => n + 1)}
                 />
               )}
             </Suspense>
-            <footer className="site-footer content-width">
-              <span>
-                <Film size={15} /> Your library, beautifully at home.
-              </span>
-              <span>
-                <Sparkles size={13} /> KODIAC{" "}
-                <span className="footer-divider">/</span> PERSONAL CINEMA
-              </span>
-              <button
-                className="refresh-library"
-                onClick={() => {
-                  setRevision((n) => n + 1);
-                  setHistoryRevision((n) => n + 1);
-                }}
-              >
-                <RefreshCw size={13} /> Refresh
-              </button>
-            </footer>
           </>
         )}
       </div>
       {session.user && (
         <>
-          <Settings
-            open={settingsOpen}
-            onClose={() => setSettingsOpen(false)}
-          />
           <CommandPalette
             open={paletteOpen}
             onClose={() => setPaletteOpen(false)}
             onOpen={onOpen}
             hub={hub}
+            onCollection={openCollection}
           />
         </>
       )}
@@ -800,9 +943,9 @@ function Cinema() {
               <X size={20} />
             </Dialog.Close>
             <span className="avatar profile-avatar">+</span>
-            <Dialog.Title>A space of their own.</Dialog.Title>
+            <Dialog.Title>Add profile</Dialog.Title>
             <Dialog.Description>
-              Separate profiles keep everyone’s Continue Watching personal.
+              Profiles keep watch progress separate within this account.
             </Dialog.Description>
             <form
               onSubmit={async (event) => {
