@@ -497,7 +497,15 @@ async fn index(
         .collect();
     let collection = metadata
         .set
-        .and_then(|x| (!x.name.trim().is_empty()).then_some(x.name));
+        .map(|x| {
+            if x.name.trim().is_empty() {
+                x.text
+            } else {
+                x.name
+            }
+        })
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty());
     let title = if metadata.title.trim().is_empty() {
         if let (Some(season), Some(episode)) = (metadata.season, metadata.episode) {
             format!("{} S{season:02}E{episode:02}", scene.title)

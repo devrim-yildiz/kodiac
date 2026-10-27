@@ -129,6 +129,7 @@ pub fn router(state: AppState) -> anyhow::Result<axum::Router> {
             Method::GET,
             Method::POST,
             Method::PATCH,
+            Method::PUT,
             Method::DELETE,
             Method::HEAD,
             Method::OPTIONS,

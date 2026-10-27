@@ -188,7 +188,7 @@ pub async fn login(
     let (user, token) = authenticate(&state, credentials).await?;
     Ok((
         [(header::SET_COOKIE, cookie(&state, &token, 604800))],
-        Json(json!({"user": {"id": user.id, "username": user.username}})),
+        Json(json!({"user": {"id": user.id, "username": user.username, "is_admin":user.is_admin}})),
     )
         .into_response())
 }

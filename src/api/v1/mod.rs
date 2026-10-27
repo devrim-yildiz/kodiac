@@ -1,5 +1,6 @@
 //! Native browser API for catalog discovery, health, playback and profiles.
 
+pub mod accounts;
 pub mod curation;
 pub mod hierarchy;
 pub mod immersion;
@@ -22,6 +23,7 @@ use serde_json::{Value, json};
 /// Build native routes requiring session authentication.
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(accounts::router())
         .merge(hierarchy::router())
         .merge(settings::router())
         .merge(curation::router())
@@ -101,7 +103,7 @@ async fn item(
     Ok(Json(db::item(&state.pool, &id).await?))
 }
 async fn me(Extension(user): Extension<User>) -> Json<Value> {
-    Json(json!({"id":user.id,"username":user.username}))
+    Json(json!({"id":user.id,"username":user.username,"is_admin":user.is_admin}))
 }
 async fn scan(
     State(state): State<AppState>,

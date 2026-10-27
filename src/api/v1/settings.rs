@@ -56,11 +56,11 @@ pub async fn effective(state: &AppState) -> Result<AppState> {
     s.config = Arc::new(c);
     Ok(s)
 }
-async fn defaults(State(s): State<AppState>) -> Result<Json<Value>> {
-    let v = values(&s).await?;
-    Ok(Json(
-        json!({"audio_language_preference":v.get("audio_language_preference").map(String::as_str).unwrap_or("eng"),"subtitle_mode":v.get("subtitle_mode").map(String::as_str).unwrap_or("off")}),
-    ))
+async fn defaults(
+    State(s): State<AppState>,
+    Extension(u): Extension<User>,
+) -> Result<Json<super::accounts::Preferences>> {
+    Ok(Json(super::accounts::load(&s, &u).await?))
 }
 async fn read(State(s): State<AppState>, Extension(u): Extension<User>) -> Result<Json<Value>> {
     admin(&s, &u).await?;

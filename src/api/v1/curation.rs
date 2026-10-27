@@ -18,6 +18,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/hub/home", get(home))
         .route("/api/v1/search", get(search))
         .route("/api/v1/people/{name}", get(person))
+        .route("/api/v1/collections/{id}", get(collection))
+        .route(
+            "/api/v1/movies/{id}/collection",
+            axum::routing::post(assign_collection),
+        )
 }
 const PROJECTION: &str = "json_object('is_anime',json(CASE WHEN COALESCE((SELECT i.is_anime FROM media_items i WHERE i.id=t.id),(SELECT max(ai.is_anime) FROM episodes ae JOIN seasons ase ON ase.id=ae.season_id JOIN media_items ai ON ai.id=ae.id WHERE ase.show_id=t.id AND ai.available=1),0)=1 THEN 'true' ELSE 'false' END),'episode_end',(SELECT i.episode_end FROM media_items i WHERE i.id=t.id),'episode_label',(SELECT i.episode_label FROM media_items i WHERE i.id=t.id),'id',t.id,'kind',t.kind,'title',t.title,'overview',t.overview,'year',t.year,'rating',t.rating,'stream_facts',json(t.streams_json),'runtime_seconds',t.runtime_seconds,'poster_url',t.poster_url,'backdrop_url',t.backdrop_url,'genres',json(t.genres_json),'show_id',t.show_id,'show_title',t.show_title,'season_id',t.season_id,'season_number',t.season_number,'episode_number',t.episode_number,'season_count',t.season_count,'episode_count',t.episode_count)";
 /// Project catalog titles using an internal SQL predicate and one bound argument.
@@ -114,12 +119,78 @@ async fn home(
     let cols:Vec<(String,String)>=sqlx::query_as("SELECT id,title FROM collections WHERE EXISTS(SELECT 1 FROM collection_movies cm JOIN media_items i ON i.id=cm.movie_id WHERE cm.collection_id=collections.id AND i.available=1) ORDER BY title").fetch_all(&s.pool).await?;
     let mut collections = Vec::new();
     for (id, title) in cols {
-        let items=titles(&s,"kind='movie' AND id IN(SELECT movie_id FROM collection_movies WHERE collection_id=?) ORDER BY year,id LIMIT 20",&id).await?;
-        collections.push(json!({"id":id,"title":title,"items":items}));
+        let items=titles(&s,"kind='movie' AND id IN(SELECT movie_id FROM collection_movies WHERE collection_id=?) ORDER BY year,title,id LIMIT 12",&id).await?;
+        let total:i64=sqlx::query_scalar("SELECT count(*) FROM collection_movies cm JOIN cinematic_titles t ON t.id=cm.movie_id WHERE cm.collection_id=? AND t.kind='movie'").bind(&id).fetch_one(&s.pool).await?;
+        collections.push(json!({"id":id,"title":title,"items":items,"total":total}));
     }
     Ok(Json(
         json!({"continue_watching":continued,"recently_added":recent,"top_rated":top,"collections":collections,"because_you_watched":recommendations,"because_title":last.map(|x|x.1),"trending_shows":trending}),
     ))
+}
+async fn collection(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<super::CatalogQuery>,
+) -> Result<Json<Value>> {
+    let title: String = sqlx::query_scalar("SELECT title FROM collections WHERE id=?")
+        .bind(&id)
+        .fetch_optional(&s.pool)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let total:i64=sqlx::query_scalar("SELECT count(*) FROM collection_movies cm JOIN cinematic_titles t ON t.id=cm.movie_id WHERE cm.collection_id=? AND t.kind='movie'").bind(&id).fetch_one(&s.pool).await?;
+    let filter = format!(
+        "kind='movie' AND id IN(SELECT movie_id FROM collection_movies WHERE collection_id=?) ORDER BY year,title,id LIMIT {} OFFSET {}",
+        q.limit.unwrap_or(100).clamp(1, 200),
+        q.offset.unwrap_or(0).max(0)
+    );
+    Ok(Json(
+        json!({"title":title,"items":titles(&s,&filter,&id).await?,"total":total}),
+    ))
+}
+#[derive(Deserialize)]
+struct CollectionInput {
+    name: String,
+}
+async fn assign_collection(
+    State(s): State<AppState>,
+    Extension(u): Extension<User>,
+    Path(id): Path<String>,
+    Json(input): Json<CollectionInput>,
+) -> Result<Json<Value>> {
+    super::settings::admin(&s, &u).await?;
+    let name = input.name.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(AppError::BadRequest(
+            "Collection name must contain 1–120 characters".into(),
+        ));
+    }
+    let mut tx = s.pool.begin().await?;
+    if !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM movies WHERE id=?)")
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        return Err(AppError::NotFound);
+    }
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM collections WHERE title=? COLLATE NOCASE ORDER BY id LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let cid = existing.unwrap_or_else(|| format!("manual:{}", uuid::Uuid::new_v4().simple()));
+    sqlx::query("INSERT OR IGNORE INTO collections(id,title) VALUES(?,?)")
+        .bind(&cid)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT OR IGNORE INTO collection_movies(collection_id,movie_id) VALUES(?,?)")
+        .bind(&cid)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"id":cid,"title":name})))
 }
 #[derive(Deserialize)]
 struct Search {

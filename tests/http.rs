@@ -2221,6 +2221,224 @@ fn login_survives_an_exhausted_disk_io_pool() {
 }
 
 #[tokio::test]
+async fn accounts_preferences_and_collections_enforce_roles_and_keep_personal_data_private() {
+    let f = Fixture::new().await;
+    let me = value(f.request("GET", "/api/v1/me", &[], Value::Null).await).await;
+    assert_eq!(me["is_admin"], true);
+    let response = f
+        .request(
+            "POST",
+            "/api/v1/users",
+            &[],
+            json!({"username":"viewer","password":"viewer-test-password","is_admin":false}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let viewer = value(response).await;
+    assert!(viewer.get("password_hash").is_none());
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/v1/users",
+            &[],
+            json!({"username":"VIEWER","password":"viewer-test-password","is_admin":true})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.request(
+            "POST",
+            "/api/v1/users",
+            &[],
+            json!({"username":"weak","password":"short","is_admin":false})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let profile_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM profiles WHERE user_id=? AND is_default=1")
+            .bind(viewer["id"].as_str().unwrap())
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(profile_count, 1);
+    let prefs = json!({"audio_language_preference":"deu","subtitle_mode":"forced","home_sections":["collections","continue"]});
+    assert_eq!(
+        value(
+            f.request("PUT", "/api/v1/preferences", &[], prefs.clone())
+                .await
+        )
+        .await,
+        prefs
+    );
+    assert_eq!(
+        value(
+            f.request("GET", "/api/v1/playback-defaults", &[], Value::Null)
+                .await
+        )
+        .await,
+        prefs
+    );
+    for invalid in [
+        json!({"audio_language_preference":"xxx","subtitle_mode":"off","home_sections":[]}),
+        json!({"audio_language_preference":"eng","subtitle_mode":"off","home_sections":["continue","continue"]}),
+        json!({"audio_language_preference":"eng","subtitle_mode":"off","home_sections":["bogus"]}),
+    ] {
+        assert_eq!(
+            f.request("PUT", "/api/v1/preferences", &[], invalid)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let self_role = format!("/api/v1/users/{}/role", f.user);
+    assert_eq!(
+        f.request("PUT", &self_role, &[], json!({"is_admin":false}))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let assign = format!("/api/v1/movies/{}/collection", f.item);
+    let collection = value(
+        f.request("POST", &assign, &[], json!({"name":"A collection"}))
+            .await,
+    )
+    .await;
+    let cid = collection["id"].as_str().unwrap();
+    // A collection larger than the Home preview remains fully reachable through pagination.
+    let library: String = sqlx::query_scalar("SELECT library_id FROM media_items WHERE id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    for n in 0..24 {
+        let id = format!("collection-{n}");
+        sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,container,size_bytes,modified_ns,scan_generation) VALUES(?,?,?,'movie',?,'mp4',1,'fixture','fixture')").bind(&id).bind(&library).bind(format!("/collection-{n}.mp4")).bind(format!("Collection Film {n:02}")).execute(&f.state.pool).await.unwrap();
+        sqlx::query("INSERT INTO collection_movies(collection_id,movie_id) VALUES(?,?)")
+            .bind(cid)
+            .bind(id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    let page = value(
+        f.request(
+            "GET",
+            &format!("/api/v1/collections/{cid}?limit=10&offset=20"),
+            &[],
+            Value::Null,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page["total"], 25);
+    assert_eq!(page["items"].as_array().unwrap().len(), 5);
+    let hub = value(f.request("GET", "/api/v1/hub/home", &[], Value::Null).await).await;
+    assert_eq!(hub["collections"][0]["total"], 25);
+    assert_eq!(hub["collections"][0]["items"].as_array().unwrap().len(), 12);
+    let (user, token) = auth::authenticate(
+        &f.state,
+        auth::Credentials {
+            username: "viewer".into(),
+            password: "viewer-test-password".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!user.is_admin);
+    let request = |method: &str, path: &str, body: Value| {
+        let app = f.app.clone();
+        let token = token.clone();
+        let path = path.to_owned();
+        let method = method.to_owned();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(method.as_str())
+                    .uri(path)
+                    .header("x-emby-token", token)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    for path in [
+        "/api/v1/users",
+        "/api/v1/settings",
+        "/api/v1/settings/stats",
+    ] {
+        assert_eq!(
+            request("GET", path, Value::Null).await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        request(
+            "POST",
+            "/api/v1/users",
+            json!({"username":"attacker","password":"a-long-test-password","is_admin":true})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request("PUT", &self_role, json!({"is_admin":true}))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request("POST", &assign, json!({"name":"Forbidden"}))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let inherited = value(request("GET", "/api/v1/preferences", Value::Null).await).await;
+    assert_ne!(inherited, prefs);
+    let personal = json!({"audio_language_preference":"jpn","subtitle_mode":"always","home_sections":["continue"]});
+    assert_eq!(
+        value(request("PUT", "/api/v1/preferences", personal.clone()).await).await,
+        personal
+    );
+    assert_eq!(
+        value(
+            f.request("GET", "/api/v1/preferences", &[], Value::Null)
+                .await
+        )
+        .await,
+        prefs
+    );
+    let role_url = format!("/api/v1/users/{}/role", viewer["id"].as_str().unwrap());
+    assert_eq!(
+        f.request("PUT", &role_url, &[], json!({"is_admin":true}))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        request("GET", "/api/v1/users", Value::Null).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.request("PUT", &role_url, &[], json!({"is_admin":false}))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        request("GET", "/api/v1/users", Value::Null).await.status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn anime_scan_preserves_absolute_numbers_nfo_and_identity() {
     let f = Fixture::new().await;
     let anime = f.state.config.media_path.join("Anime");

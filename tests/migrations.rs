@@ -68,6 +68,10 @@ async fn all_5172_records_and_progress_survive_upgrade_and_rescans() {
         .execute(&mut c)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0008_user_preferences.sql"))
+        .execute(&mut c)
+        .await
+        .unwrap();
     sqlx::raw_sql("COMMIT").execute(&mut c).await.unwrap();
     let after: Vec<String> = sqlx::query_scalar(&snapshot_sql)
         .fetch_all(&mut c)

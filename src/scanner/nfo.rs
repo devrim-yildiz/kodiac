@@ -75,6 +75,9 @@ pub struct Actor {
 pub struct NfoSet {
     /// Display name of this metadata entry.
     pub name: String,
+    /// Older NFO writers put the collection name directly inside the set element.
+    #[serde(rename = "$text")]
+    pub text: String,
 }
 /// Deserialize NFO XML, rejecting DOCTYPE and ENTITY declarations.
 ///
@@ -107,6 +110,10 @@ mod tests {
     use super::*;
     #[test]
     fn movie_and_episode() {
+        let plain = parse("<movie><set>Alien Collection</set></movie>").unwrap();
+        assert_eq!(plain.set.unwrap().text, "Alien Collection");
+        let nested = parse("<movie><set><name>Alien Collection</name></set></movie>").unwrap();
+        assert_eq!(nested.set.unwrap().name, "Alien Collection");
         let movie = parse("<movie><title>A &amp; B</title><year>2024</year><plot><![CDATA[<story>]]></plot><runtime>92</runtime></movie>").unwrap();
         assert_eq!(movie.title, "A & B");
         assert_eq!(movie.year, Some(2024));
