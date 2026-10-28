@@ -2717,3 +2717,72 @@ async fn anime_reclassification_is_atomic_idempotent_and_retains_progress() {
     assert_eq!(history["items"][0]["id"], f.item);
     assert_eq!(history["items"][0]["position_ticks"], 10000000);
 }
+
+#[tokio::test]
+async fn collection_sources_share_one_complete_shelf_search_and_detail() {
+    let f = Fixture::new().await;
+    let library: String = sqlx::query_scalar("SELECT library_id FROM media_items WHERE id=?")
+        .bind(&f.item)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    for n in 0..3 {
+        sqlx::query("INSERT INTO media_items(id,library_id,path,kind,title,container,size_bytes,modified_ns,scan_generation,available) VALUES(?,?,?,'movie',?,'mp4',1,'fixture','fixture',?)")
+            .bind(format!("alias-movie-{n}")).bind(&library).bind(format!("/alias-{n}.mp4"))
+            .bind(format!("Alias film {n}")).bind(n != 2).execute(&f.state.pool).await.unwrap();
+    }
+    sqlx::raw_sql("INSERT INTO collections(id,title,tmdb_id) VALUES('nfo:alias','  Example Filmreihe  ',NULL),('tmdb:123','Example Collection',123),('local:alias','example collection',NULL),('manual:other','Other Collection',NULL),('tmdb:901','Ambiguous Collection',901),('tmdb:902','Ambiguous Collection',902),('nfo:ambiguous','Ambiguous Filmreihe',NULL)").execute(&f.state.pool).await.unwrap();
+    for (collection, movie) in [
+        ("nfo:alias", f.item.as_str()),
+        ("tmdb:123", f.item.as_str()),
+        ("nfo:alias", "alias-movie-0"),
+        ("local:alias", "alias-movie-1"),
+        ("tmdb:123", "alias-movie-2"),
+        ("manual:other", f.item.as_str()),
+    ] {
+        sqlx::query("INSERT INTO collection_movies VALUES(?,?)")
+            .bind(collection)
+            .bind(movie)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    let hub = value(f.request("GET", "/api/v1/hub/home", &[], Value::Null).await).await;
+    assert_eq!(hub["collections"].as_array().unwrap().len(), 2);
+    let group = hub["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "tmdb:123")
+        .unwrap();
+    assert_eq!(group["title"], "Example Collection");
+    assert_eq!(group["total"], 3);
+    assert_eq!(group["items"].as_array().unwrap().len(), 3);
+    for id in ["nfo:alias", "tmdb:123", "local:alias"] {
+        let detail = value(
+            f.request(
+                "GET",
+                &format!("/api/v1/collections/{id}?limit=2&offset=2"),
+                &[],
+                Value::Null,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(detail["title"], "Example Collection");
+        assert_eq!(detail["total"], 3);
+        assert_eq!(detail["items"].as_array().unwrap().len(), 1);
+    }
+    let search = value(
+        f.request("GET", "/api/v1/search?q=Example", &[], Value::Null)
+            .await,
+    )
+    .await;
+    assert_eq!(search["franchises"].as_array().unwrap().len(), 1);
+    assert_eq!(search["franchises"][0]["id"], "tmdb:123");
+    // Source records and every original membership survive, including unavailable films.
+    let links: i64 = sqlx::query_scalar("SELECT count(*) FROM collection_movies WHERE collection_id IN ('nfo:alias','tmdb:123','local:alias')").fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(links, 5);
+    let ambiguous: i64 = sqlx::query_scalar("SELECT count(*) FROM collection_aliases WHERE id IN ('tmdb:901','tmdb:902','nfo:ambiguous') AND id=collection_id").fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(ambiguous, 3);
+}

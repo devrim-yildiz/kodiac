@@ -112,15 +112,15 @@ async fn home(
     let trending=titles(&s,"kind='show' AND EXISTS(SELECT 1 FROM episodes e JOIN seasons se ON se.id=e.season_id JOIN media_items i ON i.id=e.id WHERE se.show_id=t.id AND i.available=1 AND NOT EXISTS(SELECT 1 FROM playback_history h WHERE h.media_item_id=e.id AND h.profile_id=? AND h.completed=1)) ORDER BY created_at DESC LIMIT 20",&p).await?;
     let last:Option<(String,String)>=sqlx::query_as("SELECT t.id,t.title FROM playback_history h JOIN cinematic_titles t ON t.id=h.media_item_id WHERE h.profile_id=? ORDER BY h.updated_at DESC LIMIT 1").bind(&p).fetch_optional(&s.pool).await?;
     let recommendations = if let Some((id, _)) = &last {
-        titles(&s,"kind<>'episode' AND id<>? AND (EXISTS(SELECT 1 FROM json_each(t.genres_json) g JOIN cinematic_titles prev ON prev.id=?1 JOIN json_each(prev.genres_json) pg ON json_extract(g.value,'$.id')=json_extract(pg.value,'$.id')) OR id IN(SELECT cm.movie_id FROM collection_movies cm JOIN collection_movies prev ON prev.collection_id=cm.collection_id WHERE prev.movie_id=?1) OR id=(SELECT show_id FROM cinematic_titles WHERE id=?1)) ORDER BY rating DESC,created_at DESC LIMIT 20",id).await?
+        titles(&s,"kind<>'episode' AND id<>? AND (EXISTS(SELECT 1 FROM json_each(t.genres_json) g JOIN cinematic_titles prev ON prev.id=?1 JOIN json_each(prev.genres_json) pg ON json_extract(g.value,'$.id')=json_extract(pg.value,'$.id')) OR id IN(SELECT cm.movie_id FROM collection_members cm JOIN collection_members prev ON prev.collection_id=cm.collection_id WHERE prev.movie_id=?1) OR id=(SELECT show_id FROM cinematic_titles WHERE id=?1)) ORDER BY rating DESC,created_at DESC LIMIT 20",id).await?
     } else {
         vec![]
     };
-    let cols:Vec<(String,String)>=sqlx::query_as("SELECT id,title FROM collections WHERE EXISTS(SELECT 1 FROM collection_movies cm JOIN media_items i ON i.id=cm.movie_id WHERE cm.collection_id=collections.id AND i.available=1) ORDER BY title").fetch_all(&s.pool).await?;
+    let cols:Vec<(String,String)>=sqlx::query_as("SELECT id,title FROM collections WHERE id IN(SELECT id FROM collection_aliases WHERE id=collection_id) AND EXISTS(SELECT 1 FROM collection_members cm JOIN media_items i ON i.id=cm.movie_id WHERE cm.collection_id=collections.id AND i.available=1) ORDER BY title").fetch_all(&s.pool).await?;
     let mut collections = Vec::new();
     for (id, title) in cols {
-        let items=titles(&s,"kind='movie' AND id IN(SELECT movie_id FROM collection_movies WHERE collection_id=?) ORDER BY year,title,id LIMIT 12",&id).await?;
-        let total:i64=sqlx::query_scalar("SELECT count(*) FROM collection_movies cm JOIN cinematic_titles t ON t.id=cm.movie_id WHERE cm.collection_id=? AND t.kind='movie'").bind(&id).fetch_one(&s.pool).await?;
+        let items=titles(&s,"kind='movie' AND id IN(SELECT movie_id FROM collection_members WHERE collection_id=?) ORDER BY year,title,id LIMIT 12",&id).await?;
+        let total:i64=sqlx::query_scalar("SELECT count(*) FROM collection_members cm JOIN cinematic_titles t ON t.id=cm.movie_id WHERE cm.collection_id=? AND t.kind='movie'").bind(&id).fetch_one(&s.pool).await?;
         collections.push(json!({"id":id,"title":title,"items":items,"total":total}));
     }
     Ok(Json(
@@ -132,14 +132,14 @@ async fn collection(
     Path(id): Path<String>,
     Query(q): Query<super::CatalogQuery>,
 ) -> Result<Json<Value>> {
-    let title: String = sqlx::query_scalar("SELECT title FROM collections WHERE id=?")
+    let (id, title): (String, String) = sqlx::query_as("SELECT c.id,c.title FROM collections c JOIN collection_aliases a ON a.collection_id=c.id WHERE a.id=?")
         .bind(&id)
         .fetch_optional(&s.pool)
         .await?
         .ok_or(AppError::NotFound)?;
-    let total:i64=sqlx::query_scalar("SELECT count(*) FROM collection_movies cm JOIN cinematic_titles t ON t.id=cm.movie_id WHERE cm.collection_id=? AND t.kind='movie'").bind(&id).fetch_one(&s.pool).await?;
+    let total:i64=sqlx::query_scalar("SELECT count(*) FROM collection_members cm JOIN cinematic_titles t ON t.id=cm.movie_id WHERE cm.collection_id=? AND t.kind='movie'").bind(&id).fetch_one(&s.pool).await?;
     let filter = format!(
-        "kind='movie' AND id IN(SELECT movie_id FROM collection_movies WHERE collection_id=?) ORDER BY year,title,id LIMIT {} OFFSET {}",
+        "kind='movie' AND id IN(SELECT movie_id FROM collection_members WHERE collection_id=?) ORDER BY year,title,id LIMIT {} OFFSET {}",
         q.limit.unwrap_or(100).clamp(1, 200),
         q.offset.unwrap_or(0).max(0)
     );
@@ -214,7 +214,7 @@ async fn build_index(s: &AppState) -> Result<SearchIndex> {
         .fetch_all(&s.pool)
         .await?;
     let franchises: Vec<(String, String)> =
-        sqlx::query_as("SELECT id,title FROM collections ORDER BY title")
+        sqlx::query_as("SELECT id,title FROM collections WHERE id IN(SELECT id FROM collection_aliases WHERE id=collection_id) ORDER BY title")
             .fetch_all(&s.pool)
             .await?;
     Ok(SearchIndex {
