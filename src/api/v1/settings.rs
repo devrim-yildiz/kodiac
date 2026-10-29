@@ -198,10 +198,11 @@ async fn disk(path: std::path::PathBuf) -> Option<u64> {
             while let Some(p) = dirs.pop() {
                 if let Ok(es) = std::fs::read_dir(p) {
                     for e in es.flatten() {
-                        if let Ok(m) = e.metadata() {
+                        // A cache symlink can escape this tree or create a traversal loop.
+                        if let Ok(m) = std::fs::symlink_metadata(e.path()) {
                             if m.is_dir() {
                                 dirs.push(e.path())
-                            } else {
+                            } else if m.is_file() {
                                 sum += m.len()
                             }
                         }
